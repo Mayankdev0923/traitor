@@ -31,31 +31,38 @@ async function runTests() {
   console.log('  TRAITORS ROLE DEALER — FULL API VERIFICATION SUITE');
   console.log('='.repeat(60));
 
-  // ── 1. Create two independent games ──────────────────────────────────────
-  console.log('\n[1] Creating games…');
-  const g1 = await callApi({ action: 'create' });
-  const g2 = await callApi({ action: 'create' });
+  // ── 1. Create requirement (host name required) ────────────────────────────
+  console.log('\n[1] Creating games (host name required)…');
+  const gFail = await callApi({ action: 'create' });
+  assert(gFail.status === 400, 'Create without host name fails with 400');
+
+  const g1 = await callApi({ action: 'create', name: 'AlexHost' });
+  const g2 = await callApi({ action: 'create', name: 'SamHost' });
 
   assert(g1.status === 200 && g1.data.code, 'Game 1 created');
   assert(g2.status === 200 && g2.data.code, 'Game 2 created');
+  assert(g1.data.hostName === 'AlexHost', 'Game 1 hostName set');
+  assert(g2.data.hostName === 'SamHost', 'Game 2 hostName set');
   assert(g1.data.code !== g2.data.code, 'Game codes are unique');
 
   const G1 = g1.data.code, H1 = g1.data.hostKey;
   const G2 = g2.data.code, H2 = g2.data.hostKey;
-  console.log(`  [PASS] Game 1: ${G1}, Game 2: ${G2}`);
+  console.log(`  [PASS] Game 1 (Host: ${g1.data.hostName}), Game 2 (Host: ${g2.data.hostName})`);
 
-  // ── 2. List ongoing games (includes both new games) ──────────────────────
-  console.log('\n[2] Listing ongoing games…');
+  // ── 2. List ongoing games (code hidden, gameId & hostName returned) ────────
+  console.log('\n[2] Listing ongoing games (code concealed from home lobby)…');
   const listRes = await callApi({ action: 'list_games' });
   assert(listRes.status === 200, 'list_games returns 200');
   assert(Array.isArray(listRes.data.games), 'games is an array');
-  const codes = listRes.data.games.map(g => g.code);
-  assert(codes.includes(G1), 'Game 1 appears in list');
-  assert(codes.includes(G2), 'Game 2 appears in list');
-  console.log(`  [PASS] Both games visible in ongoing games list`);
+
+  const game1Info = listRes.data.games.find(g => g.gameId === G1);
+  assert(game1Info, 'Game 1 appears in list via gameId');
+  assert(game1Info.hostName === 'AlexHost', 'Game 1 hostName returned');
+  assert(game1Info.code === undefined, 'Raw code is NOT exposed in list_games response');
+  console.log(`  [PASS] Ongoing games list shows hostName "${game1Info.hostName}", code is hidden`);
 
   // ── 3. Direct join (code entry) ──────────────────────────────────────────
-  console.log('\n[3] Players joining directly…');
+  console.log('\n[3] Players joining directly by code…');
   const rAlice = await callApi({ action: 'join', code: G1, name: 'Alice' });
   const rBob   = await callApi({ action: 'join', code: G1, name: 'Bob' });
   assert(rAlice.status === 200 && rAlice.data.playerId, 'Alice joined Game 1');
@@ -64,11 +71,11 @@ async function runTests() {
   const bobId   = rBob.data.playerId;
   console.log('  [PASS] Alice and Bob joined Game 1 directly');
 
-  // ── 4. Join request flow ─────────────────────────────────────────────────
-  console.log('\n[4] Join-request flow…');
-  // Eve sends a request
-  const rReqEve = await callApi({ action: 'request_join', code: G1, name: 'Eve' });
-  assert(rReqEve.status === 200 && rReqEve.data.requestId, 'Eve request_join succeeds');
+  // ── 4. Join request flow (without knowing code, using gameId from lobby) ────
+  console.log('\n[4] Join-request flow (joining via ongoing games lobby)…');
+  // Eve sends a request using game1Info.gameId
+  const rReqEve = await callApi({ action: 'request_join', code: game1Info.gameId, name: 'Eve' });
+  assert(rReqEve.status === 200 && rReqEve.data.requestId, 'Eve request_join via lobby succeeds');
   const eveReqId = rReqEve.data.requestId;
 
   // Polling while pending
@@ -79,7 +86,7 @@ async function runTests() {
   const hostState0 = await callApi({ action: 'state', code: G1, hostKey: H1 });
   assert(hostState0.data.pendingRequests.length >= 1, 'Host sees pending requests');
   assert(hostState0.data.pendingRequests.some(r => r.requestId === eveReqId), 'Eve\'s request visible to host');
-  console.log('  [PASS] Eve request sent; host sees it as pending');
+  console.log('  [PASS] Eve request sent via lobby; host sees it as pending');
 
   // Host APPROVES Eve
   const rApprove = await callApi({ action: 'handle_request', code: G1, hostKey: H1, requestId: eveReqId, decision: 'approve' });
@@ -195,13 +202,13 @@ async function runTests() {
 
   // Game should no longer appear in ongoing games list
   const listAfter = await callApi({ action: 'list_games' });
-  const codesAfter = listAfter.data.games.map(g => g.code);
-  assert(!codesAfter.includes(G1), 'Game 1 removed from ongoing list after destruction');
+  const gamesAfter = listAfter.data.games.map(g => g.gameId);
+  assert(!gamesAfter.includes(G1), 'Game 1 removed from ongoing list after destruction');
   console.log('  [PASS] Game destroyed; Bob gets 404; removed from list');
 
   // ── 13. Edge-case: insufficient players ───────────────────────────────────
   console.log('\n[13] Edge cases…');
-  const gEdge = (await callApi({ action: 'create' })).data;
+  const gEdge = (await callApi({ action: 'create', name: 'EdgeHost' })).data;
   await callApi({ action: 'join', code: gEdge.code, name: 'Solo' }); // only 1 player
   const rShuffleFail = await callApi({ action: 'shuffle', code: gEdge.code, hostKey: gEdge.hostKey });
   assert(rShuffleFail.status === 400, 'Shuffle blocked with <2 players');
@@ -218,7 +225,7 @@ async function runTests() {
 
   // ── 14. Auth guard on host actions ────────────────────────────────────────
   console.log('\n[14] Auth guards…');
-  const gAuth = (await callApi({ action: 'create' })).data;
+  const gAuth = (await callApi({ action: 'create', name: 'GuardHost' })).data;
   await callApi({ action: 'join', code: gAuth.code, name: 'X' });
   await callApi({ action: 'join', code: gAuth.code, name: 'Y' });
   const rBadKey = await callApi({ action: 'shuffle', code: gAuth.code, hostKey: 'WRONG_KEY' });

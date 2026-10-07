@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 
-const REDIS_URL = process.env.UPSTASH_REDIS_REST_URL || process.env.KV_REST_API_URL;
-const REDIS_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN || process.env.KV_REST_API_TOKEN;
+const REDIS_URL = process.env.UPSTASH_REDIS_REST_URL || process.env.KV_REST_API_URL || process.env.REST_API_URL || process.env.REDIS_REST_URL;
+const REDIS_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN || process.env.KV_REST_API_TOKEN || process.env.REST_API_TOKEN || process.env.REDIS_REST_TOKEN;
 const isRedisConfigured = !!(REDIS_URL && REDIS_TOKEN);
 
 // ---------------------------------------------------------------------------
@@ -168,7 +168,10 @@ export default async function handler(req, res) {
         for (let j = 1; j < playersFlat.length; j += 2) playerNames.push(playersFlat[j]);
 
         games.push({
-          code: codes[i],
+          // NOTE: Raw game code is NOT shown on the home page.
+          // gameId is used internally to submit join requests without exposing code.
+          gameId: codes[i],
+          hostName: meta.hostName || 'Host',
           playerCount: playerNames.length,
           round: meta.round,
           createdAt: meta.createdAt,
@@ -225,6 +228,10 @@ export default async function handler(req, res) {
     // CREATE GAME (no code required)
     // ------------------------------------------------------------------
     if (action === 'create') {
+      const cleanHostName = (name || '').trim();
+      if (!cleanHostName) return res.status(400).json({ error: 'Please enter your name before creating a game.' });
+      if (cleanHostName.length > 20) return res.status(400).json({ error: 'Name is too long (max 20 characters).' });
+
       let gameCode = generateGameCode();
       const [existing] = await redisPipeline([['GET', `game:${gameCode}:meta`]]);
       if (existing?.result) gameCode = generateGameCode(); // retry once
@@ -233,6 +240,7 @@ export default async function handler(req, res) {
       const meta = {
         hostKey: hostSecret,
         hostPlayerId: null,
+        hostName: cleanHostName,
         round: 0,
         counts: { traitors: 1, doctors: 1, detectives: 1 },
         createdAt: Date.now(),
@@ -249,7 +257,7 @@ export default async function handler(req, res) {
         ['EXPIRE', 'games:index', TTL],
       ]);
 
-      return res.status(200).json({ success: true, code: gameCode, hostKey: hostSecret });
+      return res.status(200).json({ success: true, code: gameCode, hostKey: hostSecret, hostName: cleanHostName });
     }
 
     // ------------------------------------------------------------------
@@ -264,6 +272,7 @@ export default async function handler(req, res) {
       ['EXPIRE', `game:${code}:players`, TTL],
       ['EXPIRE', `game:${code}:roles`, TTL],
       ['EXPIRE', `game:${code}:acks`, TTL],
+      ['EXPIRE', `game:${code}:requests`, TTL],
     ]);
 
     const metaRaw = metaRes[0]?.result;

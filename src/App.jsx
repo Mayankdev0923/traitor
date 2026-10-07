@@ -73,6 +73,10 @@ export default function App() {
   /* ---------- host UI ---------- */
   const [selectedTransferPlayer, setSelectedTransferPlayer] = useState(null);
 
+  /* ---------- polling resilience ---------- */
+  const stateErrorCountRef = useRef(0);
+  const reqErrorCountRef = useRef(0);
+
   // ---------------------------------------------------------------------------
   // Persist session
   // ---------------------------------------------------------------------------
@@ -110,28 +114,32 @@ export default function App() {
   // Poll join-request status (while waiting for host)
   // ---------------------------------------------------------------------------
   useEffect(() => {
-    if (!pendingRequest) return;
+    if (!pendingRequest) { reqErrorCountRef.current = 0; return; }
 
     let alive = true;
     const poll = async () => {
       const { ok, data } = await api({ action: 'poll_request', code: pendingRequest.code, requestId: pendingRequest.requestId });
       if (!alive) return;
 
-      if (!ok) {
-        setErrorMsg('Join request expired or game ended.');
-        setPendingRequest(null);
-        return;
-      }
+      if (ok) {
+        reqErrorCountRef.current = 0;
+        setRequestStatus(data.status);
 
-      setRequestStatus(data.status);
-
-      if (data.status === 'approved' && data.playerId) {
-        // Transition into the game as a player
-        setSession({ code: pendingRequest.code, playerId: data.playerId, name: pendingRequest.name });
-        setPendingRequest(null);
-      } else if (data.status === 'denied') {
-        setErrorMsg('Your join request was declined by the host.');
-        setPendingRequest(null);
+        if (data.status === 'approved' && data.playerId) {
+          // Transition into the game as a player
+          setSession({ code: pendingRequest.code, playerId: data.playerId, name: pendingRequest.name });
+          setPendingRequest(null);
+        } else if (data.status === 'denied') {
+          setErrorMsg('Your join request was declined by the host.');
+          setPendingRequest(null);
+        }
+      } else {
+        reqErrorCountRef.current += 1;
+        if (reqErrorCountRef.current >= 3) {
+          setErrorMsg('Join request expired or game ended.');
+          setPendingRequest(null);
+          reqErrorCountRef.current = 0;
+        }
       }
     };
 
@@ -144,7 +152,7 @@ export default function App() {
   // Main game state polling loop (once in a session)
   // ---------------------------------------------------------------------------
   useEffect(() => {
-    if (!session?.code) { setGameState(null); return; }
+    if (!session?.code) { setGameState(null); stateErrorCountRef.current = 0; return; }
 
     let alive = true;
     const poll = async () => {
@@ -156,6 +164,7 @@ export default function App() {
       if (!alive) return;
 
       if (ok) {
+        stateErrorCountRef.current = 0;
         setErrorMsg('');
         setGameState(data);
 
@@ -173,8 +182,12 @@ export default function App() {
           }
         }
       } else if (status === 404 || status === 401) {
-        setErrorMsg(data.error || 'Game session ended or host left.');
-        setSession(null);
+        stateErrorCountRef.current += 1;
+        if (stateErrorCountRef.current >= 3) {
+          setErrorMsg(data.error || 'Game session ended or host left.');
+          setSession(null);
+          stateErrorCountRef.current = 0;
+        }
       }
     };
 
@@ -204,10 +217,12 @@ export default function App() {
   // Actions
   // ---------------------------------------------------------------------------
   const handleCreateGame = async () => {
+    const name = inputName.trim();
+    if (!name) { setErrorMsg('Please enter your name first before creating a game.'); return; }
     setLoading(true); setErrorMsg('');
-    const { ok, data } = await api({ action: 'create' });
+    const { ok, data } = await api({ action: 'create', name });
     setLoading(false);
-    if (ok) setSession({ code: data.code, hostKey: data.hostKey });
+    if (ok) setSession({ code: data.code, hostKey: data.hostKey, hostName: data.hostName });
     else setErrorMsg(data.error || 'Failed to create game.');
   };
 
@@ -224,14 +239,14 @@ export default function App() {
     else setErrorMsg(data.error || 'Could not join game.');
   };
 
-  const handleRequestJoin = async (gameCode) => {
+  const handleRequestJoin = async (targetGameId, hostName) => {
     const name = inputName.trim();
-    if (!name) { setErrorMsg('Enter your name first before requesting to join a game.'); return; }
+    if (!name) { setErrorMsg('Please enter your name above first before requesting to join.'); return; }
     setLoading(true); setErrorMsg('');
-    const { ok, data } = await api({ action: 'request_join', code: gameCode, name });
+    const { ok, data } = await api({ action: 'request_join', code: targetGameId, name });
     setLoading(false);
     if (ok) {
-      setPendingRequest({ code: gameCode, requestId: data.requestId, name: data.name });
+      setPendingRequest({ code: targetGameId, requestId: data.requestId, name: data.name, hostName });
       setRequestStatus('pending');
     } else {
       setErrorMsg(data.error || 'Could not send join request.');
@@ -334,7 +349,7 @@ export default function App() {
 
           {/* Name field (shared between join-by-code and request-join) */}
           <div className="brutalist-card">
-            <div className="card-title"><Users size={22} /><span>Join or Create</span></div>
+            <div className="card-title"><Users size={22} /><span>Join or Host</span></div>
 
             <label className="field-label">Your Name</label>
             <input
@@ -342,7 +357,7 @@ export default function App() {
               value={inputName} onChange={e => setInputName(e.target.value)} maxLength={20}
             />
 
-            <label className="field-label" style={{ marginTop: '4px' }}>Join by 4-letter code</label>
+            <label className="field-label" style={{ marginTop: '12px' }}>Join by 4-letter code (if you know it)</label>
             <input
               type="text" className="brutalist-input" placeholder="e.g. K9X4"
               value={inputCode} onChange={e => setInputCode(e.target.value.toUpperCase())}
@@ -375,21 +390,21 @@ export default function App() {
 
             {ongoingGames.length === 0 ? (
               <p style={{ fontWeight: '500', color: '#64748B', fontStyle: 'italic', textAlign: 'center', padding: '16px 0' }}>
-                No active games right now. Create one above!
+                No active games right now. Enter your name and create one above!
               </p>
             ) : (
               <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
                 <AnimatePresence>
                   {ongoingGames.map(g => (
                     <motion.div
-                      key={g.code}
+                      key={g.gameId}
                       className="lobby-game-row"
                       initial={{ scale: 0.95, opacity: 0 }}
                       animate={{ scale: 1, opacity: 1 }}
                       exit={{ scale: 0.95, opacity: 0 }}
                     >
                       <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
-                        <span style={{ fontFamily: 'var(--font-heading)', fontSize: '1.3rem', letterSpacing: '3px' }}>{g.code}</span>
+                        <span style={{ fontFamily: 'var(--font-heading)', fontSize: '1.2rem' }}>Hosted by {g.hostName}</span>
                         <span style={{ fontSize: '0.8rem', fontWeight: '600', color: '#475569' }}>
                           {g.playerCount} player{g.playerCount !== 1 ? 's' : ''} &bull; Round {g.round}
                         </span>
@@ -397,7 +412,7 @@ export default function App() {
                       <button
                         className="brutalist-btn"
                         style={{ width: 'auto', padding: '8px 14px', fontSize: '0.85rem' }}
-                        onClick={() => handleRequestJoin(g.code)}
+                        onClick={() => handleRequestJoin(g.gameId, g.hostName)}
                         disabled={loading}
                       >
                         <UserPlus size={16} /><span>Request to Join</span>
@@ -419,7 +434,7 @@ export default function App() {
           <Clock size={40} style={{ marginBottom: '16px' }} />
           <h2 style={{ fontFamily: 'var(--font-heading)', fontSize: '1.5rem', marginBottom: '8px' }}>WAITING FOR HOST</h2>
           <p style={{ fontWeight: '500', color: '#475569', marginBottom: '20px' }}>
-            Your request to join <strong>{pendingRequest.code}</strong> as <strong>{pendingRequest.name}</strong> is pending.<br />
+            Your request to join game hosted by <strong>{pendingRequest.hostName || 'Host'}</strong> as <strong>{pendingRequest.name}</strong> is pending.<br />
             The host needs to approve you.
           </p>
           <div style={{ display: 'flex', gap: '8px', justifyContent: 'center', marginBottom: '20px' }}>
