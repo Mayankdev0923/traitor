@@ -130,6 +130,10 @@ function generateSecretKey() { return crypto.randomBytes(16).toString('hex'); }
 
 const TTL = 86400; // 24 hours
 
+if (!isRedisConfigured && process.env.VERCEL) {
+  return res.status(500).json({ error: 'Redis is not configured on this deployment.' });
+}
+
 // ---------------------------------------------------------------------------
 // Main handler
 // ---------------------------------------------------------------------------
