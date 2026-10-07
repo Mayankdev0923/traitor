@@ -56,7 +56,7 @@ const SLOT_ROLES = ['Traitor', 'Doctor', 'Detective', 'Villager'];
 export default function App() {
   const [session, setSession] = useState(() => {
     try {
-      const saved = localStorage.getItem(STORAGE_KEY);
+      const saved = sessionStorage.getItem(STORAGE_KEY) || localStorage.getItem(STORAGE_KEY);
       return saved ? JSON.parse(saved) : null;
     } catch (e) {
       return null;
@@ -84,8 +84,10 @@ export default function App() {
 
   useEffect(() => {
     if (session) {
+      sessionStorage.setItem(STORAGE_KEY, JSON.stringify(session));
       localStorage.setItem(STORAGE_KEY, JSON.stringify(session));
     } else {
+      sessionStorage.removeItem(STORAGE_KEY);
       localStorage.removeItem(STORAGE_KEY);
     }
   }, [session]);

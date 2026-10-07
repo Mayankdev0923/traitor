@@ -81,10 +81,20 @@ async function redisPipeline(commands) {
 
   if (!res.ok) {
     const errText = await res.text();
-    throw new Error(`Upstash Redis REST error (${res.status}): ${errText}`);
+    throw new Error(`Upstash Redis REST HTTP error (${res.status}): ${errText}`);
   }
 
-  return await res.json();
+  const data = await res.json();
+  if (Array.isArray(data)) {
+    for (const item of data) {
+      if (item && item.error) {
+        console.error('Upstash Redis Pipeline Item Error:', item.error, 'Commands:', commands);
+        throw new Error(`Redis Command Error: ${item.error}`);
+      }
+    }
+  }
+
+  return data;
 }
 
 function parseHash(flatArray) {
@@ -146,11 +156,11 @@ export default async function handler(req, res) {
       };
 
       await redisPipeline([
-        ['SET', `game:${gameCode}:meta`, JSON.stringify(meta), 'EX', '86400'],
+        ['SET', `game:${gameCode}:meta`, JSON.stringify(meta)],
+        ['EXPIRE', `game:${gameCode}:meta`, 86400],
         ['DEL', `game:${gameCode}:players`],
         ['DEL', `game:${gameCode}:roles`],
         ['DEL', `game:${gameCode}:acks`],
-        ['EXPIRE', `game:${gameCode}:players`, '86400'],
       ]);
 
       return res.status(200).json({
@@ -167,10 +177,10 @@ export default async function handler(req, res) {
     // Retrieve meta & extend TTL
     const metaRes = await redisPipeline([
       ['GET', `game:${code}:meta`],
-      ['EXPIRE', `game:${code}:meta`, '86400'],
-      ['EXPIRE', `game:${code}:players`, '86400'],
-      ['EXPIRE', `game:${code}:roles`, '86400'],
-      ['EXPIRE', `game:${code}:acks`, '86400'],
+      ['EXPIRE', `game:${code}:meta`, 86400],
+      ['EXPIRE', `game:${code}:players`, 86400],
+      ['EXPIRE', `game:${code}:roles`, 86400],
+      ['EXPIRE', `game:${code}:acks`, 86400],
     ]);
 
     const metaRaw = metaRes[0]?.result;
@@ -194,6 +204,7 @@ export default async function handler(req, res) {
 
       await redisPipeline([
         ['HSET', `game:${code}:players`, pId, cleanName],
+        ['EXPIRE', `game:${code}:players`, 86400],
       ]);
 
       return res.status(200).json({
@@ -216,7 +227,8 @@ export default async function handler(req, res) {
           meta.hostPlayerId = newHostPlayerId;
 
           await redisPipeline([
-            ['SET', `game:${code}:meta`, JSON.stringify(meta), 'EX', '86400'],
+            ['SET', `game:${code}:meta`, JSON.stringify(meta)],
+            ['EXPIRE', `game:${code}:meta`, 86400],
           ]);
 
           return res.status(200).json({ success: true, transferred: true });
@@ -256,7 +268,6 @@ export default async function handler(req, res) {
 
       const playerIds = Object.keys(playersObj);
 
-      // Check if current requester is host or has been assigned host role
       let isHost = hostKey === meta.hostKey;
       let newlyPromotedHost = false;
 
@@ -276,7 +287,7 @@ export default async function handler(req, res) {
 
         return res.status(200).json({
           isHost: true,
-          hostKey: meta.hostKey, // Provided so promoted players update hostKey
+          hostKey: meta.hostKey,
           code,
           round: meta.round,
           counts: meta.counts,
@@ -292,7 +303,6 @@ export default async function handler(req, res) {
 
         const playerAcked = acksObj[playerId] === String(meta.round);
         
-        // Return role to player during current round (even if acked, to support re-viewing secret role)
         let role = null;
         if (meta.round > 0 && playerRole) {
           role = playerRole;
@@ -319,6 +329,7 @@ export default async function handler(req, res) {
 
       await redisPipeline([
         ['HSET', `game:${code}:acks`, playerId, String(meta.round)],
+        ['EXPIRE', `game:${code}:acks`, 86400],
       ]);
 
       return res.status(200).json({ success: true, acked: true });
@@ -342,7 +353,8 @@ export default async function handler(req, res) {
       meta.counts = { traitors, doctors, detectives };
 
       await redisPipeline([
-        ['SET', `game:${code}:meta`, JSON.stringify(meta), 'EX', '86400'],
+        ['SET', `game:${code}:meta`, JSON.stringify(meta)],
+        ['EXPIRE', `game:${code}:meta`, 86400],
       ]);
 
       return res.status(200).json({ success: true, counts: meta.counts });
@@ -389,10 +401,12 @@ export default async function handler(req, res) {
 
       // Update meta, clear old roles & acks, write new roles for round
       await redisPipeline([
-        ['SET', `game:${code}:meta`, JSON.stringify(meta), 'EX', '86400'],
+        ['SET', `game:${code}:meta`, JSON.stringify(meta)],
+        ['EXPIRE', `game:${code}:meta`, 86400],
         ['DEL', `game:${code}:roles`],
         ['DEL', `game:${code}:acks`],
         ['HSET', `game:${code}:roles`, ...roleCommands],
+        ['EXPIRE', `game:${code}:roles`, 86400],
       ]);
 
       return res.status(200).json({
