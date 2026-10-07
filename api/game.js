@@ -2,80 +2,85 @@ import crypto from 'node:crypto';
 
 const REDIS_URL = process.env.UPSTASH_REDIS_REST_URL || process.env.KV_REST_API_URL;
 const REDIS_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN || process.env.KV_REST_API_TOKEN;
-
 const isRedisConfigured = !!(REDIS_URL && REDIS_TOKEN);
 
-// In-memory storage fallback for local development or testing without Redis
+// ---------------------------------------------------------------------------
+// In-memory store (fallback for local dev / test)
+// ---------------------------------------------------------------------------
 const memoryStore = new Map();
 
 function runInMemoryCommand(cmd) {
   const op = cmd[0].toUpperCase();
+
   if (op === 'SET') {
     memoryStore.set(cmd[1], { type: 'string', value: cmd[2] });
     return { result: 'OK' };
-  } else if (op === 'GET') {
+  }
+  if (op === 'GET') {
     const item = memoryStore.get(cmd[1]);
     return { result: item && item.type === 'string' ? item.value : null };
-  } else if (op === 'HSET') {
+  }
+  if (op === 'HSET') {
     const key = cmd[1];
     let item = memoryStore.get(key);
     if (!item || item.type !== 'hash') {
       item = { type: 'hash', value: new Map() };
       memoryStore.set(key, item);
     }
-    for (let i = 2; i < cmd.length; i += 2) {
-      item.value.set(cmd[i], cmd[i + 1]);
-    }
+    for (let i = 2; i < cmd.length; i += 2) item.value.set(cmd[i], cmd[i + 1]);
     return { result: 'OK' };
-  } else if (op === 'HGET') {
-    const key = cmd[1];
-    const field = cmd[2];
-    const item = memoryStore.get(key);
-    if (item && item.type === 'hash') {
-      return { result: item.value.get(field) || null };
-    }
-    return { result: null };
-  } else if (op === 'HGETALL') {
-    const key = cmd[1];
-    const item = memoryStore.get(key);
+  }
+  if (op === 'HGET') {
+    const item = memoryStore.get(cmd[1]);
+    return { result: item && item.type === 'hash' ? (item.value.get(cmd[2]) || null) : null };
+  }
+  if (op === 'HGETALL') {
+    const item = memoryStore.get(cmd[1]);
     if (item && item.type === 'hash') {
       const flat = [];
-      for (const [k, v] of item.value.entries()) {
-        flat.push(k, v);
-      }
+      for (const [k, v] of item.value.entries()) flat.push(k, v);
       return { result: flat };
     }
     return { result: [] };
-  } else if (op === 'HDEL') {
+  }
+  if (op === 'HDEL') {
+    const item = memoryStore.get(cmd[1]);
+    if (item && item.type === 'hash') item.value.delete(cmd[2]);
+    return { result: 1 };
+  }
+  if (op === 'DEL') {
+    for (let i = 1; i < cmd.length; i++) memoryStore.delete(cmd[i]);
+    return { result: 1 };
+  }
+  if (op === 'EXPIRE') return { result: 1 };
+  if (op === 'SADD') {
     const key = cmd[1];
-    const field = cmd[2];
-    const item = memoryStore.get(key);
-    if (item && item.type === 'hash') {
-      item.value.delete(field);
+    let item = memoryStore.get(key);
+    if (!item || item.type !== 'set') {
+      item = { type: 'set', value: new Set() };
+      memoryStore.set(key, item);
     }
+    for (let i = 2; i < cmd.length; i++) item.value.add(cmd[i]);
     return { result: 1 };
-  } else if (op === 'DEL') {
-    for (let i = 1; i < cmd.length; i++) {
-      memoryStore.delete(cmd[i]);
-    }
+  }
+  if (op === 'SREM') {
+    const item = memoryStore.get(cmd[1]);
+    if (item && item.type === 'set') item.value.delete(cmd[2]);
     return { result: 1 };
-  } else if (op === 'EXPIRE') {
-    return { result: 1 };
+  }
+  if (op === 'SMEMBERS') {
+    const item = memoryStore.get(cmd[1]);
+    return { result: item && item.type === 'set' ? [...item.value] : [] };
   }
   return { result: null };
 }
 
 async function redisPipeline(commands) {
-  if (!isRedisConfigured) {
-    return commands.map(cmd => runInMemoryCommand(cmd));
-  }
+  if (!isRedisConfigured) return commands.map(cmd => runInMemoryCommand(cmd));
 
   const res = await fetch(`${REDIS_URL}/pipeline`, {
     method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${REDIS_TOKEN}`,
-      'Content-Type': 'application/json',
-    },
+    headers: { 'Authorization': `Bearer ${REDIS_TOKEN}`, 'Content-Type': 'application/json' },
     body: JSON.stringify(commands),
   });
 
@@ -93,16 +98,16 @@ async function redisPipeline(commands) {
       }
     }
   }
-
   return data;
 }
 
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
 function parseHash(flatArray) {
   const obj = {};
   if (!Array.isArray(flatArray)) return obj;
-  for (let i = 0; i < flatArray.length; i += 2) {
-    obj[flatArray[i]] = flatArray[i + 1];
-  }
+  for (let i = 0; i < flatArray.length; i += 2) obj[flatArray[i]] = flatArray[i + 1];
   return obj;
 }
 
@@ -118,33 +123,111 @@ function cryptoShuffle(array) {
 const ALPHABET = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
 function generateGameCode() {
   let code = '';
-  for (let i = 0; i < 4; i++) {
-    const randomIndex = crypto.randomInt(0, ALPHABET.length);
-    code += ALPHABET[randomIndex];
-  }
+  for (let i = 0; i < 4; i++) code += ALPHABET[crypto.randomInt(0, ALPHABET.length)];
   return code;
 }
+function generateSecretKey() { return crypto.randomBytes(16).toString('hex'); }
 
-function generateSecretKey() {
-  return crypto.randomBytes(16).toString('hex');
-}
+const TTL = 86400; // 24 hours
 
+// ---------------------------------------------------------------------------
+// Main handler
+// ---------------------------------------------------------------------------
 export default async function handler(req, res) {
-  if (req.method !== 'POST') {
-    return res.status(405).json({ error: 'Method not allowed. Use POST.' });
-  }
+  if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed. Use POST.' });
 
   try {
-    const { action, code: rawCode, hostKey, playerId, name, counts, newHostPlayerId } = req.body || {};
+    const { action, code: rawCode, hostKey, playerId, name, counts, newHostPlayerId, requestId } = req.body || {};
     const code = rawCode ? rawCode.toUpperCase().trim() : '';
 
-    // Action 1: CREATE GAME
+    // ------------------------------------------------------------------
+    // PUBLIC: LIST ONGOING GAMES
+    // ------------------------------------------------------------------
+    if (action === 'list_games') {
+      const [membersRes] = await redisPipeline([['SMEMBERS', 'games:index']]);
+      const codes = membersRes?.result || [];
+
+      if (codes.length === 0) return res.status(200).json({ games: [] });
+
+      // Fetch meta for each game in parallel (pipeline)
+      const metaCommands = codes.map(c => ['GET', `game:${c}:meta`]);
+      const playerCountCommands = codes.map(c => ['HGETALL', `game:${c}:players`]);
+      const metaResults = await redisPipeline([...metaCommands, ...playerCountCommands]);
+
+      const games = [];
+      for (let i = 0; i < codes.length; i++) {
+        const metaRaw = metaResults[i]?.result;
+        if (!metaRaw) {
+          // Stale index entry — clean up lazily
+          await redisPipeline([['SREM', 'games:index', codes[i]]]);
+          continue;
+        }
+        const meta = JSON.parse(metaRaw);
+        const playersFlat = metaResults[codes.length + i]?.result || [];
+        const playerNames = [];
+        for (let j = 1; j < playersFlat.length; j += 2) playerNames.push(playersFlat[j]);
+
+        games.push({
+          code: codes[i],
+          playerCount: playerNames.length,
+          round: meta.round,
+          createdAt: meta.createdAt,
+        });
+      }
+
+      return res.status(200).json({ games });
+    }
+
+    // ------------------------------------------------------------------
+    // PUBLIC: REQUEST TO JOIN (unauthenticated — sends a request to host)
+    // ------------------------------------------------------------------
+    if (action === 'request_join') {
+      if (!code) return res.status(400).json({ error: 'Game code is required.' });
+
+      const [metaRaw] = await redisPipeline([['GET', `game:${code}:meta`]]);
+      if (!metaRaw?.result) return res.status(404).json({ error: 'Game not found. Check the code.' });
+
+      const cleanName = (name || '').trim();
+      if (!cleanName) return res.status(400).json({ error: 'Please enter a valid name.' });
+      if (cleanName.length > 20) return res.status(400).json({ error: 'Name is too long (max 20 characters).' });
+
+      const reqId = 'r_' + crypto.randomBytes(8).toString('hex');
+      const reqPayload = JSON.stringify({ name: cleanName, status: 'pending', playerId: null });
+
+      await redisPipeline([
+        ['HSET', `game:${code}:requests`, reqId, reqPayload],
+        ['EXPIRE', `game:${code}:requests`, TTL],
+      ]);
+
+      return res.status(200).json({ success: true, requestId: reqId, name: cleanName });
+    }
+
+    // ------------------------------------------------------------------
+    // PUBLIC: POLL REQUEST STATUS (player polls until approved/denied)
+    // ------------------------------------------------------------------
+    if (action === 'poll_request') {
+      if (!code) return res.status(400).json({ error: 'Game code is required.' });
+      if (!requestId) return res.status(400).json({ error: 'Request ID is required.' });
+
+      const [reqRaw] = await redisPipeline([['HGET', `game:${code}:requests`, requestId]]);
+      if (!reqRaw?.result) return res.status(404).json({ error: 'Join request not found or expired.' });
+
+      const request = JSON.parse(reqRaw.result);
+      return res.status(200).json({
+        status: request.status,     // 'pending' | 'approved' | 'denied'
+        playerId: request.playerId, // set when approved
+        name: request.name,
+        code,
+      });
+    }
+
+    // ------------------------------------------------------------------
+    // CREATE GAME (no code required)
+    // ------------------------------------------------------------------
     if (action === 'create') {
       let gameCode = generateGameCode();
-      const checkRes = await redisPipeline([['GET', `game:${gameCode}:meta`]]);
-      if (checkRes[0]?.result) {
-        gameCode = generateGameCode();
-      }
+      const [existing] = await redisPipeline([['GET', `game:${gameCode}:meta`]]);
+      if (existing?.result) gameCode = generateGameCode(); // retry once
 
       const hostSecret = generateSecretKey();
       const meta = {
@@ -157,94 +240,82 @@ export default async function handler(req, res) {
 
       await redisPipeline([
         ['SET', `game:${gameCode}:meta`, JSON.stringify(meta)],
-        ['EXPIRE', `game:${gameCode}:meta`, 86400],
+        ['EXPIRE', `game:${gameCode}:meta`, TTL],
         ['DEL', `game:${gameCode}:players`],
         ['DEL', `game:${gameCode}:roles`],
         ['DEL', `game:${gameCode}:acks`],
+        ['DEL', `game:${gameCode}:requests`],
+        ['SADD', 'games:index', gameCode],
+        ['EXPIRE', 'games:index', TTL],
       ]);
 
-      return res.status(200).json({
-        success: true,
-        code: gameCode,
-        hostKey: hostSecret,
-      });
+      return res.status(200).json({ success: true, code: gameCode, hostKey: hostSecret });
     }
 
-    if (!code) {
-      return res.status(400).json({ error: 'Game code is required.' });
-    }
+    // ------------------------------------------------------------------
+    // Require code for all remaining actions
+    // ------------------------------------------------------------------
+    if (!code) return res.status(400).json({ error: 'Game code is required.' });
 
-    // Retrieve meta & extend TTL
+    // Retrieve meta & extend TTL for all remaining actions
     const metaRes = await redisPipeline([
       ['GET', `game:${code}:meta`],
-      ['EXPIRE', `game:${code}:meta`, 86400],
-      ['EXPIRE', `game:${code}:players`, 86400],
-      ['EXPIRE', `game:${code}:roles`, 86400],
-      ['EXPIRE', `game:${code}:acks`, 86400],
+      ['EXPIRE', `game:${code}:meta`, TTL],
+      ['EXPIRE', `game:${code}:players`, TTL],
+      ['EXPIRE', `game:${code}:roles`, TTL],
+      ['EXPIRE', `game:${code}:acks`, TTL],
     ]);
 
     const metaRaw = metaRes[0]?.result;
-    if (!metaRaw) {
-      return res.status(404).json({ error: 'Game not found or host has left. Return to home screen.' });
-    }
-
+    if (!metaRaw) return res.status(404).json({ error: 'Game not found or host has left. Return to home screen.' });
     const meta = JSON.parse(metaRaw);
 
-    // Action 2: JOIN GAME
+    // ------------------------------------------------------------------
+    // JOIN GAME (direct — used after host approves a request, or manual code entry)
+    // ------------------------------------------------------------------
     if (action === 'join') {
       const cleanName = (name || '').trim();
-      if (!cleanName) {
-        return res.status(400).json({ error: 'Please enter a valid player name.' });
-      }
-      if (cleanName.length > 20) {
-        return res.status(400).json({ error: 'Name is too long (max 20 characters).' });
-      }
+      if (!cleanName) return res.status(400).json({ error: 'Please enter a valid player name.' });
+      if (cleanName.length > 20) return res.status(400).json({ error: 'Name is too long (max 20 characters).' });
 
       const pId = 'p_' + crypto.randomBytes(8).toString('hex');
-
       await redisPipeline([
         ['HSET', `game:${code}:players`, pId, cleanName],
-        ['EXPIRE', `game:${code}:players`, 86400],
+        ['EXPIRE', `game:${code}:players`, TTL],
       ]);
 
-      return res.status(200).json({
-        success: true,
-        code,
-        playerId: pId,
-        name: cleanName,
-      });
+      return res.status(200).json({ success: true, code, playerId: pId, name: cleanName });
     }
 
-    // Action 3: LEAVE GAME (Player or Host)
+    // ------------------------------------------------------------------
+    // LEAVE GAME
+    // ------------------------------------------------------------------
     if (action === 'leave') {
       const isHostLeaving = hostKey === meta.hostKey;
 
       if (isHostLeaving) {
         if (newHostPlayerId) {
-          // Transfer host to designated player
           const newHostKey = generateSecretKey();
           meta.hostKey = newHostKey;
           meta.hostPlayerId = newHostPlayerId;
-
           await redisPipeline([
             ['SET', `game:${code}:meta`, JSON.stringify(meta)],
-            ['EXPIRE', `game:${code}:meta`, 86400],
+            ['EXPIRE', `game:${code}:meta`, TTL],
           ]);
-
           return res.status(200).json({ success: true, transferred: true });
         } else {
-          // Host leaves without transferring -> Destroy entire game instance!
+          // Destroy entire game instance
           await redisPipeline([
             ['DEL', `game:${code}:meta`],
             ['DEL', `game:${code}:players`],
             ['DEL', `game:${code}:roles`],
             ['DEL', `game:${code}:acks`],
+            ['DEL', `game:${code}:requests`],
+            ['SREM', 'games:index', code],
           ]);
-
           return res.status(200).json({ success: true, destroyed: true });
         }
       } else if (playerId) {
-        // Regular player leaves
         await redisPipeline([
           ['HDEL', `game:${code}:players`, playerId],
           ['HDEL', `game:${code}:roles`, playerId],
@@ -252,9 +323,12 @@ export default async function handler(req, res) {
         ]);
         return res.status(200).json({ success: true });
       }
+      return res.status(400).json({ error: 'Missing playerId or hostKey.' });
     }
 
-    // Action 4: GET STATE (Host or Player)
+    // ------------------------------------------------------------------
+    // GET STATE
+    // ------------------------------------------------------------------
     if (action === 'state') {
       const statePipeline = await redisPipeline([
         ['HGETALL', `game:${code}:players`],
@@ -265,7 +339,6 @@ export default async function handler(req, res) {
       const playersObj = parseHash(statePipeline[0]?.result);
       const acksObj = parseHash(statePipeline[1]?.result);
       const playerRole = statePipeline[2]?.result;
-
       const playerIds = Object.keys(playersObj);
 
       let isHost = hostKey === meta.hostKey;
@@ -277,13 +350,21 @@ export default async function handler(req, res) {
       }
 
       if (isHost) {
+        // Fetch pending join requests
+        const [reqRes] = await redisPipeline([['HGETALL', `game:${code}:requests`]]);
+        const reqObj = parseHash(reqRes?.result);
+        const pendingRequests = Object.entries(reqObj)
+          .map(([rid, raw]) => {
+            try { return { requestId: rid, ...JSON.parse(raw) }; }
+            catch { return null; }
+          })
+          .filter(r => r && r.status === 'pending');
+
         const playerList = playerIds.map(id => ({
           id,
           name: playersObj[id],
           acked: acksObj[id] === String(meta.round),
         }));
-
-        const totalConfirmed = playerList.filter(p => p.acked).length;
 
         return res.status(200).json({
           isHost: true,
@@ -293,8 +374,9 @@ export default async function handler(req, res) {
           counts: meta.counts,
           players: playerList,
           totalPlayers: playerList.length,
-          confirmedCount: totalConfirmed,
+          confirmedCount: playerList.filter(p => p.acked).length,
           newlyPromotedHost,
+          pendingRequests,
         });
       } else {
         if (!playerId || !playersObj[playerId]) {
@@ -302,11 +384,15 @@ export default async function handler(req, res) {
         }
 
         const playerAcked = acksObj[playerId] === String(meta.round);
-        
         let role = null;
-        if (meta.round > 0 && playerRole) {
-          role = playerRole;
-        }
+        if (meta.round > 0 && playerRole) role = playerRole;
+
+        // Build public player list (names only, no roles)
+        const playerList = playerIds.map(id => ({
+          id,
+          name: playersObj[id],
+          acked: acksObj[id] === String(meta.round),
+        }));
 
         return res.status(200).json({
           isHost: false,
@@ -317,106 +403,124 @@ export default async function handler(req, res) {
           acked: playerAcked,
           totalPlayers: playerIds.length,
           dealStarted: meta.round > 0,
+          players: playerList, // All players (names only) visible to everyone
         });
       }
     }
 
-    // Action 5: ACKNOWLEDGE ROLE
+    // ------------------------------------------------------------------
+    // ACK ROLE
+    // ------------------------------------------------------------------
     if (action === 'ack') {
-      if (!playerId) {
-        return res.status(400).json({ error: 'Player ID required for ack.' });
-      }
-
+      if (!playerId) return res.status(400).json({ error: 'Player ID required for ack.' });
       await redisPipeline([
         ['HSET', `game:${code}:acks`, playerId, String(meta.round)],
-        ['EXPIRE', `game:${code}:acks`, 86400],
+        ['EXPIRE', `game:${code}:acks`, TTL],
       ]);
-
       return res.status(200).json({ success: true, acked: true });
     }
 
-    // --- Host actions below require secret hostKey verification ---
+    // ------------------------------------------------------------------
+    // HOST-ONLY ACTIONS — verify hostKey
+    // ------------------------------------------------------------------
     if (hostKey !== meta.hostKey) {
       return res.status(403).json({ error: 'Unauthorized: Invalid host key.' });
     }
 
-    // Action 6: UPDATE COUNTS
-    if (action === 'counts') {
-      if (!counts || typeof counts !== 'object') {
-        return res.status(400).json({ error: 'Invalid counts payload.' });
+    // ------------------------------------------------------------------
+    // HANDLE JOIN REQUEST (host approves / denies)
+    // ------------------------------------------------------------------
+    if (action === 'handle_request') {
+      const { decision } = req.body; // 'approve' | 'deny'
+      if (!requestId) return res.status(400).json({ error: 'requestId is required.' });
+      if (!['approve', 'deny'].includes(decision)) return res.status(400).json({ error: 'Decision must be approve or deny.' });
+
+      const [reqRaw] = await redisPipeline([['HGET', `game:${code}:requests`, requestId]]);
+      if (!reqRaw?.result) return res.status(404).json({ error: 'Request not found.' });
+
+      const request = JSON.parse(reqRaw.result);
+
+      if (decision === 'approve') {
+        // Create player entry, link playerId back to request
+        const pId = 'p_' + crypto.randomBytes(8).toString('hex');
+        request.status = 'approved';
+        request.playerId = pId;
+
+        await redisPipeline([
+          ['HSET', `game:${code}:players`, pId, request.name],
+          ['EXPIRE', `game:${code}:players`, TTL],
+          ['HSET', `game:${code}:requests`, requestId, JSON.stringify(request)],
+        ]);
+
+        return res.status(200).json({ success: true, approved: true, playerId: pId });
+      } else {
+        request.status = 'denied';
+        await redisPipeline([['HSET', `game:${code}:requests`, requestId, JSON.stringify(request)]]);
+        return res.status(200).json({ success: true, denied: true });
       }
+    }
 
-      const traitors = Math.max(0, parseInt(counts.traitors || 0, 10));
-      const doctors = Math.max(0, parseInt(counts.doctors || 0, 10));
-      const detectives = Math.max(0, parseInt(counts.detectives || 0, 10));
-
-      meta.counts = { traitors, doctors, detectives };
-
+    // ------------------------------------------------------------------
+    // UPDATE COUNTS
+    // ------------------------------------------------------------------
+    if (action === 'counts') {
+      if (!counts || typeof counts !== 'object') return res.status(400).json({ error: 'Invalid counts payload.' });
+      meta.counts = {
+        traitors: Math.max(0, parseInt(counts.traitors || 0, 10)),
+        doctors: Math.max(0, parseInt(counts.doctors || 0, 10)),
+        detectives: Math.max(0, parseInt(counts.detectives || 0, 10)),
+      };
       await redisPipeline([
         ['SET', `game:${code}:meta`, JSON.stringify(meta)],
-        ['EXPIRE', `game:${code}:meta`, 86400],
+        ['EXPIRE', `game:${code}:meta`, TTL],
       ]);
-
       return res.status(200).json({ success: true, counts: meta.counts });
     }
 
-    // Action 7: SHUFFLE AND DEAL
+    // ------------------------------------------------------------------
+    // SHUFFLE AND DEAL
+    // ------------------------------------------------------------------
     if (action === 'shuffle') {
-      const playersRes = await redisPipeline([
-        ['HGETALL', `game:${code}:players`],
-      ]);
-
-      const playersObj = parseHash(playersRes[0]?.result);
+      const [playersRes] = await redisPipeline([['HGETALL', `game:${code}:players`]]);
+      const playersObj = parseHash(playersRes?.result);
       const playerIds = Object.keys(playersObj);
 
-      if (playerIds.length < 2) {
-        return res.status(400).json({ error: 'Need at least 2 players to start a game.' });
-      }
+      if (playerIds.length < 2) return res.status(400).json({ error: 'Need at least 2 players to start a game.' });
 
       const { traitors = 1, doctors = 1, detectives = 1 } = meta.counts;
       const specialCount = traitors + doctors + detectives;
-
       if (specialCount > playerIds.length) {
         return res.status(400).json({
           error: `Special roles (${specialCount}) exceed total players (${playerIds.length}). Reduce counts to continue.`,
         });
       }
 
-      const villagerCount = playerIds.length - specialCount;
-
       const deck = [];
       for (let i = 0; i < traitors; i++) deck.push('Traitor');
       for (let i = 0; i < doctors; i++) deck.push('Doctor');
       for (let i = 0; i < detectives; i++) deck.push('Detective');
-      for (let i = 0; i < villagerCount; i++) deck.push('Villager');
+      for (let i = 0; i < playerIds.length - specialCount; i++) deck.push('Villager');
 
       const shuffledDeck = cryptoShuffle(deck);
-
       const roleCommands = [];
-      playerIds.forEach((id, index) => {
-        roleCommands.push(id, shuffledDeck[index]);
-      });
+      playerIds.forEach((id, idx) => roleCommands.push(id, shuffledDeck[idx]));
 
       meta.round = (meta.round || 0) + 1;
 
-      // Update meta, clear old roles & acks, write new roles for round
       await redisPipeline([
         ['SET', `game:${code}:meta`, JSON.stringify(meta)],
-        ['EXPIRE', `game:${code}:meta`, 86400],
+        ['EXPIRE', `game:${code}:meta`, TTL],
         ['DEL', `game:${code}:roles`],
         ['DEL', `game:${code}:acks`],
         ['HSET', `game:${code}:roles`, ...roleCommands],
-        ['EXPIRE', `game:${code}:roles`, 86400],
+        ['EXPIRE', `game:${code}:roles`, TTL],
       ]);
 
-      return res.status(200).json({
-        success: true,
-        round: meta.round,
-        totalPlayers: playerIds.length,
-      });
+      return res.status(200).json({ success: true, round: meta.round, totalPlayers: playerIds.length });
     }
 
     return res.status(400).json({ error: `Unknown action '${action}'.` });
+
   } catch (err) {
     console.error('API Error:', err);
     return res.status(500).json({ error: err.message || 'Internal server error.' });

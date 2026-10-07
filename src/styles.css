@@ -444,6 +444,46 @@ body {
   gap: 8px;
 }
 
+/* Field label */
+.field-label {
+  display: block;
+  font-weight: 700;
+  font-size: 0.85rem;
+  margin-bottom: 6px;
+  text-transform: uppercase;
+}
+
+/* Ongoing game lobby row */
+.lobby-game-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 14px;
+  border: var(--border-thick);
+  background: var(--white);
+  box-shadow: 3px 3px 0px var(--black);
+  gap: 12px;
+}
+
+/* Request card (host approval panel) */
+.request-card {
+  border-color: var(--neon-mint);
+  background: #F0FFF9;
+}
+
+.request-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 0;
+  border-top: 2px solid var(--black);
+  gap: 10px;
+}
+
+.request-row:first-of-type {
+  border-top: none;
+}
+
 /* Respect Reduced Motion */
 @media (prefers-reduced-motion: reduce) {
   .marquee-track,
