@@ -218,11 +218,11 @@ export default function App() {
   // ---------------------------------------------------------------------------
   const handleCreateGame = async () => {
     const name = inputName.trim();
-    if (!name) { setErrorMsg('Please enter your name first before creating a game.'); return; }
+    if (!name) { setErrorMsg('Please enter your name in "Your Name" above before creating a game.'); return; }
     setLoading(true); setErrorMsg('');
-    const { ok, data } = await api({ action: 'create', name });
+    const { ok, data } = await api({ action: 'create', name, hostName: name });
     setLoading(false);
-    if (ok) setSession({ code: data.code, hostKey: data.hostKey, hostName: data.hostName });
+    if (ok) setSession({ code: data.code, hostKey: data.hostKey, hostName: data.hostName || name });
     else setErrorMsg(data.error || 'Failed to create game.');
   };
 
@@ -231,7 +231,7 @@ export default function App() {
     const code = inputCode.trim().toUpperCase();
     const name = inputName.trim();
     if (!code || code.length !== 4) { setErrorMsg('Please enter a 4-character game code.'); return; }
-    if (!name) { setErrorMsg('Please enter your player name.'); return; }
+    if (!name) { setErrorMsg('Please enter your player name in "Your Name" above.'); return; }
     setLoading(true); setErrorMsg('');
     const { ok, data } = await api({ action: 'join', code, name });
     setLoading(false);
@@ -241,7 +241,7 @@ export default function App() {
 
   const handleRequestJoin = async (targetGameId, hostName) => {
     const name = inputName.trim();
-    if (!name) { setErrorMsg('Please enter your name above first before requesting to join.'); return; }
+    if (!name) { setErrorMsg('Please enter your name in "Your Name" above before requesting to join.'); return; }
     setLoading(true); setErrorMsg('');
     const { ok, data } = await api({ action: 'request_join', code: targetGameId, name });
     setLoading(false);
@@ -347,17 +347,17 @@ export default function App() {
       {!session && !pendingRequest && (
         <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }}>
 
-          {/* Name field (shared between join-by-code and request-join) */}
+          {/* Name field (shared between join-by-code, request-join, and create-game) */}
           <div className="brutalist-card">
-            <div className="card-title"><Users size={22} /><span>Join or Host</span></div>
+            <div className="card-title"><Users size={22} /><span>Join or Host Game</span></div>
 
-            <label className="field-label">Your Name</label>
+            <label className="field-label">Your Name (Required for Host &amp; Player)</label>
             <input
-              type="text" className="brutalist-input" placeholder="e.g. Alex"
+              type="text" className="brutalist-input" placeholder="Enter your name (e.g. Alex)"
               value={inputName} onChange={e => setInputName(e.target.value)} maxLength={20}
             />
 
-            <label className="field-label" style={{ marginTop: '12px' }}>Join by 4-letter code (if you know it)</label>
+            <label className="field-label" style={{ marginTop: '14px' }}>Have a 4-letter game code?</label>
             <input
               type="text" className="brutalist-input" placeholder="e.g. K9X4"
               value={inputCode} onChange={e => setInputCode(e.target.value.toUpperCase())}
@@ -369,9 +369,14 @@ export default function App() {
             </button>
 
             <div style={{ borderTop: '3px solid #000', marginTop: '20px', paddingTop: '20px', textAlign: 'center' }}>
-              <p style={{ fontWeight: '700', fontSize: '0.9rem', marginBottom: '12px', textTransform: 'uppercase' }}>Hosting a new table?</p>
+              <p style={{ fontWeight: '700', fontSize: '0.9rem', marginBottom: '8px', textTransform: 'uppercase' }}>Want to host a new game table?</p>
+              {inputName.trim() && (
+                <p style={{ fontSize: '0.8rem', fontWeight: '600', color: '#16A34A', marginBottom: '8px' }}>
+                  Hosting as: <strong>{inputName.trim()}</strong>
+                </p>
+              )}
               <button className="brutalist-btn brutalist-btn-dark" onClick={handleCreateGame} disabled={loading}>
-                <Sparkles size={20} /><span>Create Game (Host)</span>
+                <Sparkles size={20} /><span>Create Game (Host as {inputName.trim() || '…'})</span>
               </button>
             </div>
           </div>
