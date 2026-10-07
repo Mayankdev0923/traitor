@@ -8,13 +8,10 @@ const isRedisConfigured = !!(REDIS_URL && REDIS_TOKEN);
 // In-memory storage fallback for local development or testing without Redis
 const memoryStore = new Map();
 
-// Helper to simulate Redis commands in memory
 function runInMemoryCommand(cmd) {
   const op = cmd[0].toUpperCase();
   if (op === 'SET') {
-    const key = cmd[1];
-    const val = cmd[2];
-    memoryStore.set(key, { type: 'string', value: val });
+    memoryStore.set(cmd[1], { type: 'string', value: cmd[2] });
     return { result: 'OK' };
   } else if (op === 'GET') {
     const item = memoryStore.get(cmd[1]);
@@ -99,7 +96,6 @@ function parseHash(flatArray) {
   return obj;
 }
 
-// Cryptographically sound shuffle (Fisher-Yates with randomInt)
 function cryptoShuffle(array) {
   const arr = [...array];
   for (let i = arr.length - 1; i > 0; i--) {
@@ -109,7 +105,6 @@ function cryptoShuffle(array) {
   return arr;
 }
 
-// Non-confusing characters (no 0/O/1/I/L)
 const ALPHABET = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
 function generateGameCode() {
   let code = '';
@@ -130,7 +125,7 @@ export default async function handler(req, res) {
   }
 
   try {
-    const { action, code: rawCode, hostKey, playerId, name, counts } = req.body || {};
+    const { action, code: rawCode, hostKey, playerId, name, counts, newHostPlayerId } = req.body || {};
     const code = rawCode ? rawCode.toUpperCase().trim() : '';
 
     // Action 1: CREATE GAME
@@ -144,6 +139,7 @@ export default async function handler(req, res) {
       const hostSecret = generateSecretKey();
       const meta = {
         hostKey: hostSecret,
+        hostPlayerId: null,
         round: 0,
         counts: { traitors: 1, doctors: 1, detectives: 1 },
         createdAt: Date.now(),
@@ -165,10 +161,10 @@ export default async function handler(req, res) {
     }
 
     if (!code) {
-      return res.status(400).json({ error: 'Game code is required. Please check your 4-character code.' });
+      return res.status(400).json({ error: 'Game code is required.' });
     }
 
-    // Retrieve meta & update TTL
+    // Retrieve meta & extend TTL
     const metaRes = await redisPipeline([
       ['GET', `game:${code}:meta`],
       ['EXPIRE', `game:${code}:meta`, '86400'],
@@ -179,7 +175,7 @@ export default async function handler(req, res) {
 
     const metaRaw = metaRes[0]?.result;
     if (!metaRaw) {
-      return res.status(404).json({ error: 'Game not found or expired. Check the code or create a new game.' });
+      return res.status(404).json({ error: 'Game not found or host has left. Return to home screen.' });
     }
 
     const meta = JSON.parse(metaRaw);
@@ -208,16 +204,42 @@ export default async function handler(req, res) {
       });
     }
 
-    // Action 3: LEAVE GAME
+    // Action 3: LEAVE GAME (Player or Host)
     if (action === 'leave') {
-      if (playerId) {
+      const isHostLeaving = hostKey === meta.hostKey;
+
+      if (isHostLeaving) {
+        if (newHostPlayerId) {
+          // Transfer host to designated player
+          const newHostKey = generateSecretKey();
+          meta.hostKey = newHostKey;
+          meta.hostPlayerId = newHostPlayerId;
+
+          await redisPipeline([
+            ['SET', `game:${code}:meta`, JSON.stringify(meta), 'EX', '86400'],
+          ]);
+
+          return res.status(200).json({ success: true, transferred: true });
+        } else {
+          // Host leaves without transferring -> Destroy entire game instance!
+          await redisPipeline([
+            ['DEL', `game:${code}:meta`],
+            ['DEL', `game:${code}:players`],
+            ['DEL', `game:${code}:roles`],
+            ['DEL', `game:${code}:acks`],
+          ]);
+
+          return res.status(200).json({ success: true, destroyed: true });
+        }
+      } else if (playerId) {
+        // Regular player leaves
         await redisPipeline([
           ['HDEL', `game:${code}:players`, playerId],
           ['HDEL', `game:${code}:roles`, playerId],
           ['HDEL', `game:${code}:acks`, playerId],
         ]);
+        return res.status(200).json({ success: true });
       }
-      return res.status(200).json({ success: true });
     }
 
     // Action 4: GET STATE (Host or Player)
@@ -233,10 +255,17 @@ export default async function handler(req, res) {
       const playerRole = statePipeline[2]?.result;
 
       const playerIds = Object.keys(playersObj);
-      const isHost = hostKey === meta.hostKey;
+
+      // Check if current requester is host or has been assigned host role
+      let isHost = hostKey === meta.hostKey;
+      let newlyPromotedHost = false;
+
+      if (!isHost && playerId && meta.hostPlayerId === playerId) {
+        isHost = true;
+        newlyPromotedHost = true;
+      }
 
       if (isHost) {
-        // Host view: roster, confirmed status, counts
         const playerList = playerIds.map(id => ({
           id,
           name: playersObj[id],
@@ -247,23 +276,25 @@ export default async function handler(req, res) {
 
         return res.status(200).json({
           isHost: true,
+          hostKey: meta.hostKey, // Provided so promoted players update hostKey
           code,
           round: meta.round,
           counts: meta.counts,
           players: playerList,
           totalPlayers: playerList.length,
           confirmedCount: totalConfirmed,
+          newlyPromotedHost,
         });
       } else {
-        // Player view: isolated player information
         if (!playerId || !playersObj[playerId]) {
           return res.status(401).json({ error: 'Player session not found in this game.' });
         }
 
         const playerAcked = acksObj[playerId] === String(meta.round);
         
+        // Return role to player during current round (even if acked, to support re-viewing secret role)
         let role = null;
-        if (meta.round > 0 && !playerAcked && playerRole) {
+        if (meta.round > 0 && playerRole) {
           role = playerRole;
         }
 
@@ -280,7 +311,7 @@ export default async function handler(req, res) {
       }
     }
 
-    // Action 5: ACKNOWLEDGE ROLE (Player saw their role)
+    // Action 5: ACKNOWLEDGE ROLE
     if (action === 'ack') {
       if (!playerId) {
         return res.status(400).json({ error: 'Player ID required for ack.' });
@@ -288,7 +319,6 @@ export default async function handler(req, res) {
 
       await redisPipeline([
         ['HSET', `game:${code}:acks`, playerId, String(meta.round)],
-        ['HDEL', `game:${code}:roles`, playerId], // Wipe stored role from server for secrecy!
       ]);
 
       return res.status(200).json({ success: true, acked: true });
@@ -342,17 +372,14 @@ export default async function handler(req, res) {
 
       const villagerCount = playerIds.length - specialCount;
 
-      // Construct deck of roles
       const deck = [];
       for (let i = 0; i < traitors; i++) deck.push('Traitor');
       for (let i = 0; i < doctors; i++) deck.push('Doctor');
       for (let i = 0; i < detectives; i++) deck.push('Detective');
       for (let i = 0; i < villagerCount; i++) deck.push('Villager');
 
-      // Cryptographically shuffle deck
       const shuffledDeck = cryptoShuffle(deck);
 
-      // Map roles to players
       const roleCommands = [];
       playerIds.forEach((id, index) => {
         roleCommands.push(id, shuffledDeck[index]);
@@ -360,7 +387,7 @@ export default async function handler(req, res) {
 
       meta.round = (meta.round || 0) + 1;
 
-      // Update meta, clear old roles & acks, write new roles
+      // Update meta, clear old roles & acks, write new roles for round
       await redisPipeline([
         ['SET', `game:${code}:meta`, JSON.stringify(meta), 'EX', '86400'],
         ['DEL', `game:${code}:roles`],

@@ -17,7 +17,7 @@
   box-sizing: border-box;
   margin: 0;
   padding: 0;
-  border-radius: 0 !important; /* Strict brutalist square corners */
+  border-radius: 0 !important;
 }
 
 body {
@@ -413,6 +413,21 @@ body {
   0% { box-shadow: 0 0 0 0px rgba(57, 255, 180, 0.7); }
   70% { box-shadow: 0 0 0 16px rgba(57, 255, 180, 0); }
   100% { box-shadow: 0 0 0 0px rgba(57, 255, 180, 0); }
+}
+
+/* Modal Overlay */
+.modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.75);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: 16px;
 }
 
 /* Error Banner */

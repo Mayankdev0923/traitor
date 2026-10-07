@@ -16,7 +16,10 @@ import {
   AlertCircle,
   LogOut,
   Shield,
-  Sparkles
+  Sparkles,
+  Eye,
+  Crown,
+  Trash2
 } from 'lucide-react';
 
 const STORAGE_KEY = 'traitors_session_v1';
@@ -51,7 +54,6 @@ const ROLE_INFO = {
 const SLOT_ROLES = ['Traitor', 'Doctor', 'Detective', 'Villager'];
 
 export default function App() {
-  // Session state from localStorage
   const [session, setSession] = useState(() => {
     try {
       const saved = localStorage.getItem(STORAGE_KEY);
@@ -61,22 +63,25 @@ export default function App() {
     }
   });
 
-  // Local inputs
   const [inputCode, setInputCode] = useState('');
   const [inputName, setInputName] = useState('');
 
-  // Game server state
   const [gameState, setGameState] = useState(null);
   const [errorMsg, setErrorMsg] = useState('');
   const [copiedCode, setCopiedCode] = useState(false);
   const [loading, setLoading] = useState(false);
 
+  // Peek role state for player
+  const [isPeekingRole, setIsPeekingRole] = useState(false);
+
+  // Transfer host modal state
+  const [selectedTransferPlayer, setSelectedTransferPlayer] = useState(null);
+
   // Reveal animation states
-  const [revealState, setRevealState] = useState('IDLE'); // IDLE, REVEALING, REVEALED
+  const [revealState, setRevealState] = useState('IDLE');
   const [slotRole, setSlotRole] = useState('Villager');
   const lastRoundRef = useRef(0);
 
-  // Save session changes
   useEffect(() => {
     if (session) {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(session));
@@ -85,7 +90,7 @@ export default function App() {
     }
   }, [session]);
 
-  // Polling loop (every 1.5s)
+  // Polling loop
   useEffect(() => {
     if (!session?.code) {
       setGameState(null);
@@ -115,17 +120,25 @@ export default function App() {
           setErrorMsg('');
           setGameState(data);
 
-          // Handle player role reveal trigger when round updates and role exists
+          // Handle automatic promotion to host if host transferred to this player
+          if (data.isHost && data.hostKey && session.playerId && !session.hostKey) {
+            setSession({
+              code: session.code,
+              hostKey: data.hostKey,
+            });
+          }
+
+          // Trigger slot machine reveal when a new round starts and role is un-acked
           if (!data.isHost && data.role && !data.acked) {
             if (data.round !== lastRoundRef.current) {
               lastRoundRef.current = data.round;
+              setIsPeekingRole(false);
               triggerSlotReveal();
             }
           }
         } else {
-          // If session expired or invalid
           if (res.status === 404 || res.status === 401) {
-            setErrorMsg(data.error || 'Game session ended.');
+            setErrorMsg(data.error || 'Game session ended or host left.');
             setSession(null);
           }
         }
@@ -142,7 +155,6 @@ export default function App() {
     };
   }, [session]);
 
-  // Slot machine animation trigger
   const triggerSlotReveal = () => {
     setRevealState('REVEALING');
     let cycles = 0;
@@ -159,7 +171,6 @@ export default function App() {
     }, 100);
   };
 
-  // Actions
   const handleCreateGame = async () => {
     setLoading(true);
     setErrorMsg('');
@@ -286,8 +297,8 @@ export default function App() {
         setGameState((prev) => ({
           ...prev,
           acked: true,
-          role: null,
         }));
+        setIsPeekingRole(false);
         setRevealState('IDLE');
       }
     } catch (err) {
@@ -295,7 +306,51 @@ export default function App() {
     }
   };
 
-  const handleLeave = async () => {
+  const handleTransferHost = async (targetPlayerId) => {
+    if (!session?.hostKey || !targetPlayerId) return;
+    setLoading(true);
+    try {
+      const res = await fetch('/api/game', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'leave',
+          code: session.code,
+          hostKey: session.hostKey,
+          newHostPlayerId: targetPlayerId,
+        }),
+      });
+      if (res.ok) {
+        setSession(null);
+        setGameState(null);
+        setSelectedTransferPlayer(null);
+      }
+    } catch (err) {
+      setErrorMsg('Failed to transfer host.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleDestroyGame = async () => {
+    if (!session?.hostKey) return;
+    if (!window.confirm('Are you sure you want to end and remove this game instance?')) return;
+    try {
+      await fetch('/api/game', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'leave',
+          code: session.code,
+          hostKey: session.hostKey,
+        }),
+      });
+    } catch (e) {}
+    setSession(null);
+    setGameState(null);
+  };
+
+  const handleLeavePlayer = async () => {
     if (session?.code) {
       try {
         await fetch('/api/game', {
@@ -305,7 +360,6 @@ export default function App() {
             action: 'leave',
             code: session.code,
             playerId: session.playerId,
-            hostKey: session.hostKey,
           }),
         });
       } catch (e) {}
@@ -651,18 +705,39 @@ export default function App() {
                         animate={{ scale: 1, opacity: 1 }}
                         exit={{ scale: 0.8, opacity: 0 }}
                       >
-                        <span>{p.name}</span>
-                        {gameState.round > 0 ? (
-                          p.acked ? (
-                            <span className="player-ack-badge confirmed">
-                              <Check size={14} /> Seen &amp; Hidden
-                            </span>
-                          ) : (
-                            <span className="player-ack-badge waiting">Viewing Role...</span>
-                          )
-                        ) : (
-                          <span className="player-ack-badge waiting">Ready</span>
-                        )}
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                          <span>{p.name}</span>
+                          {gameState.round > 0 && (
+                            p.acked ? (
+                              <span className="player-ack-badge confirmed">
+                                <Check size={14} /> Hidden
+                              </span>
+                            ) : (
+                              <span className="player-ack-badge waiting">Viewing</span>
+                            )
+                          )}
+                        </div>
+
+                        {/* Host Transfer Action */}
+                        <button
+                          className="brutalist-btn-icon"
+                          title={`Make ${p.name} the new Host`}
+                          onClick={() => setSelectedTransferPlayer(p)}
+                          style={{
+                            padding: '4px 8px',
+                            fontSize: '0.75rem',
+                            fontWeight: '700',
+                            border: 'var(--border-thick)',
+                            background: 'var(--white)',
+                            cursor: 'pointer',
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '4px',
+                          }}
+                        >
+                          <Crown size={14} color="#000" />
+                          <span>Pass Host</span>
+                        </button>
                       </motion.div>
                     ))}
                   </AnimatePresence>
@@ -671,14 +746,46 @@ export default function App() {
             </div>
           )}
 
-          <button
-            className="brutalist-btn brutalist-btn-secondary"
-            onClick={handleLeave}
-            style={{ marginTop: '10px' }}
-          >
-            <LogOut size={18} />
-            <span>Leave Game Room</span>
-          </button>
+          {/* Transfer Host Modal */}
+          {selectedTransferPlayer && (
+            <div className="modal-overlay">
+              <div className="brutalist-card" style={{ maxWidth: '380px', width: '90%' }}>
+                <div className="card-title">
+                  <Crown size={22} />
+                  <span>Transfer Host Duty?</span>
+                </div>
+                <p style={{ fontWeight: '500', marginBottom: '16px' }}>
+                  Make <strong>{selectedTransferPlayer.name}</strong> the new host? You will step down as host and leave the room.
+                </p>
+                <div style={{ display: 'flex', gap: '10px' }}>
+                  <button
+                    className="brutalist-btn"
+                    onClick={() => handleTransferHost(selectedTransferPlayer.id)}
+                    disabled={loading}
+                  >
+                    Confirm Transfer
+                  </button>
+                  <button
+                    className="brutalist-btn brutalist-btn-secondary"
+                    onClick={() => setSelectedTransferPlayer(null)}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Host Room Management Controls */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', marginTop: '16px' }}>
+            <button
+              className="brutalist-btn brutalist-btn-dark"
+              onClick={handleDestroyGame}
+            >
+              <Trash2 size={18} />
+              <span>End &amp; Delete Game Instance</span>
+            </button>
+          </div>
         </motion.div>
       )}
 
@@ -697,7 +804,7 @@ export default function App() {
               <div style={{ fontWeight: '700', fontSize: '1.1rem' }}>{session.name}</div>
             </div>
             <button
-              onClick={handleLeave}
+              onClick={handleLeavePlayer}
               style={{ background: 'none', border: 'none', color: '#FFF', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '4px', fontSize: '0.8rem', fontWeight: '700' }}
             >
               <LogOut size={16} /> Exit
@@ -717,8 +824,8 @@ export default function App() {
             </div>
           )}
 
-          {/* STATE B: ROLE DEALT & REVEAL CYCLE */}
-          {gameState?.dealStarted && gameState?.round > 0 && gameState?.role && !gameState?.acked && (
+          {/* STATE B: ROLE DEALT OR PEEKING ROLE */}
+          {gameState?.dealStarted && gameState?.round > 0 && gameState?.role && (!gameState?.acked || isPeekingRole) && (
             <div>
               {revealState === 'REVEALING' && (
                 <div className="role-card-display role-card-doctor">
@@ -737,7 +844,7 @@ export default function App() {
                 </div>
               )}
 
-              {revealState === 'REVEALED' && (() => {
+              {(revealState === 'REVEALED' || isPeekingRole) && (() => {
                 const info = ROLE_INFO[gameState.role] || ROLE_INFO.Villager;
                 const RoleIcon = info.icon;
 
@@ -772,7 +879,7 @@ export default function App() {
                       style={{ marginTop: '24px' }}
                     >
                       <Lock size={20} />
-                      <span>I've seen it. Hide</span>
+                      <span>{isPeekingRole ? 'Hide Role Again' : "I've seen it. Hide"}</span>
                     </button>
                   </motion.div>
                 );
@@ -780,8 +887,8 @@ export default function App() {
             </div>
           )}
 
-          {/* STATE C: LOCKED / HIDDEN STATE */}
-          {gameState?.dealStarted && (gameState?.acked || !gameState?.role) && (
+          {/* STATE C: LOCKED / HIDDEN STATE (WITH PEEK OPTION) */}
+          {gameState?.dealStarted && gameState?.acked && !isPeekingRole && (
             <motion.div
               className="locked-box"
               initial={{ scale: 0.9, opacity: 0 }}
@@ -796,8 +903,20 @@ export default function App() {
               <p style={{ fontWeight: '500', color: '#E2E8F0', maxWidth: '300px', margin: '0 auto 16px auto' }}>
                 Your secret role is locked and hidden from view. Keep your phone concealed.
               </p>
-              <div style={{ fontSize: '0.85rem', fontWeight: '700', background: 'rgba(255,255,255,0.1)', padding: '8px 12px', border: '1px solid #39FFB4', display: 'inline-block' }}>
-                Waiting for host to reshuffle...
+              
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', alignItems: 'center' }}>
+                <button
+                  className="brutalist-btn"
+                  onClick={() => setIsPeekingRole(true)}
+                  style={{ fontSize: '0.95rem' }}
+                >
+                  <Eye size={18} />
+                  <span>See Secret Role Again</span>
+                </button>
+
+                <div style={{ fontSize: '0.8rem', fontWeight: '700', color: '#94A3B8' }}>
+                  Waiting for host to reshuffle...
+                </div>
               </div>
             </motion.div>
           )}
