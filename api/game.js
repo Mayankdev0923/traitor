@@ -141,11 +141,7 @@ export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed. Use POST.' });
 
   try {
-    let body = req.body || {};
-    if (typeof body === 'string') {
-      try { body = JSON.parse(body); } catch { body = {}; }
-    }
-    const { action, code: rawCode, hostKey, playerId, name, hostName, counts, newHostPlayerId, requestId } = body;
+    const { action, code: rawCode, hostKey, playerId, name, counts, newHostPlayerId, requestId } = req.body || {};
     const code = rawCode ? rawCode.toUpperCase().trim() : '';
 
     // ------------------------------------------------------------------
@@ -236,8 +232,8 @@ export default async function handler(req, res) {
     // CREATE GAME (no code required)
     // ------------------------------------------------------------------
     if (action === 'create') {
-      const cleanHostName = (name || hostName || '').trim();
-      if (!cleanHostName) return res.status(400).json({ error: 'Please enter your host name before creating a game.' });
+      const cleanHostName = (name || '').trim();
+      if (!cleanHostName) return res.status(400).json({ error: 'Please enter your name before creating a game.' });
       if (cleanHostName.length > 20) return res.status(400).json({ error: 'Name is too long (max 20 characters).' });
 
       let gameCode = generateGameCode();
