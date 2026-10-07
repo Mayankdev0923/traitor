@@ -392,11 +392,7 @@ export default async function handler(req, res) {
           pendingRequests,
         });
       } else {
-        if (!playerId || !playersObj[playerId]) {
-          return res.status(401).json({ error: 'Player session not found in this game.' });
-        }
-
-        const playerAcked = acksObj[playerId] === String(meta.round);
+        const playerAcked = playerId ? acksObj[playerId] === String(meta.round) : false;
         let role = null;
         if (meta.round > 0 && playerRole) role = playerRole;
 
@@ -407,10 +403,12 @@ export default async function handler(req, res) {
           acked: acksObj[id] === String(meta.round),
         }));
 
+        const playerName = (playerId && playersObj[playerId]) ? playersObj[playerId] : (name || 'Player');
+
         return res.status(200).json({
           isHost: false,
           code,
-          name: playersObj[playerId],
+          name: playerName,
           round: meta.round,
           role,
           acked: playerAcked,
@@ -444,7 +442,7 @@ export default async function handler(req, res) {
     // HANDLE JOIN REQUEST (host approves / denies)
     // ------------------------------------------------------------------
     if (action === 'handle_request') {
-      const { decision } = req.body; // 'approve' | 'deny'
+      const { decision } = body; // 'approve' | 'deny'
       if (!requestId) return res.status(400).json({ error: 'requestId is required.' });
       if (!['approve', 'deny'].includes(decision)) return res.status(400).json({ error: 'Decision must be approve or deny.' });
 
