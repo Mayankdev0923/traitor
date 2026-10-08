@@ -491,11 +491,11 @@ function AppInner() {
               <div className="player-list">
                 {gameState.players.map((p) => (
                   <div key={p.pid} className={'player-item' + (p.dead ? ' is-dead' : '')}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, flex: 1, minWidth: 0 }}>
-                      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{p.name}</span>
+                    <div className="player-name">
+                      <span>{p.name}</span>
                       <AckBadge p={p} />
                     </div>
-                    <div style={{ display: 'flex', gap: 6 }}>
+                    <div className="player-controls">
                       <button title={p.dead ? `Revive ${p.name}` : `Mark ${p.name} dead`} aria-label={p.dead ? `Revive ${p.name}` : `Mark ${p.name} dead`} onClick={() => (p.dead ? revive(p) : markDead(p))} style={{ padding: '4px 8px', fontSize: '0.75rem', fontWeight: 700, border: 'var(--border-thick)', background: p.dead ? 'var(--neon-mint)' : 'var(--white)', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4 }}>
                         {p.dead ? <Undo2 size={14} /> : <Skull size={14} />}<span>{p.dead ? 'Revive' : 'Dead'}</span>
                       </button>

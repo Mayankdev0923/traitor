@@ -294,12 +294,35 @@ body {
 .player-item {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   justify-content: space-between;
+  row-gap: 8px;
   padding: 10px 14px;
   border: var(--border-thick);
   background: var(--white);
   box-shadow: 3px 3px 0px var(--black);
   font-weight: 600;
+}
+
+.player-name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1 1 140px;
+  min-width: 0;
+}
+
+.player-name > span:first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.player-controls {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 .player-ack-badge {

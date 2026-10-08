@@ -4,6 +4,7 @@ const REDIS_URL = process.env.UPSTASH_REDIS_REST_URL || process.env.KV_REST_API_
 const REDIS_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN || process.env.KV_REST_API_TOKEN || process.env.REST_API_TOKEN || process.env.REDIS_REST_TOKEN;
 const isRedisConfigured = !!(REDIS_URL && REDIS_TOKEN);
 const TTL = 86400;
+const INACTIVITY_LIMIT = 20 * 60 * 1000; // auto-delete a game after 20 min with no activity
 const MAX_PLAYERS = 40;
 const MAX_PENDING = 30;
 
@@ -65,6 +66,14 @@ function cryptoShuffle(arr) {
   return a;
 }
 
+const destroyCmds = (c) => {
+  const k = (s) => `game:${c}:${s}`;
+  return [
+    ['DEL', k('meta')], ['DEL', k('players')], ['DEL', k('roles')], ['DEL', k('acks')],
+    ['DEL', k('dead')], ['DEL', k('votes')], ['DEL', k('requests')], ['SREM', 'games:index', c],
+  ];
+};
+
 // Traitors win when they equal/outnumber the other living players; everyone else wins when no traitor is left.
 function winnerOf(players, roles, dead) {
   const ids = Object.keys(roles).filter((id) => players[id]);
@@ -102,6 +111,8 @@ export default async function handler(req, res) {
       for (let i = 0; i < codes.length; i++) {
         const meta = safeParse(out[i]);
         if (!meta) { await redis([['SREM', 'games:index', codes[i]]]); continue; }
+        const last = meta.lastActivity || meta.createdAt || 0;
+        if (Date.now() - last > INACTIVITY_LIMIT) { await redis(destroyCmds(codes[i])); continue; }
         games.push({
           gameId: codes[i],
           hostName: meta.hostName || 'Host',
@@ -118,7 +129,7 @@ export default async function handler(req, res) {
       const e = nameErr(hn);
       if (e) return fail(400, e);
       const hostSecret = genSecret();
-      const meta = { hostKey: hostSecret, hostPlayerId: null, hostName: hn, round: 0, counts: { traitors: 1, doctors: 1, detectives: 1 }, createdAt: Date.now() };
+      const meta = { hostKey: hostSecret, hostPlayerId: null, hostName: hn, round: 0, counts: { traitors: 1, doctors: 1, detectives: 1 }, createdAt: Date.now(), lastActivity: Date.now() };
       let gameCode = null;
       for (let i = 0; i < 8 && !gameCode; i++) {
         const c = genCode();
@@ -139,7 +150,16 @@ export default async function handler(req, res) {
     ]);
     const meta = safeParse(metaRaw);
     if (!meta) return fail(404, 'Game not found or host has left.');
+
+    // ---- auto-delete the game after 20 minutes with no activity ----
+    const lastActivity = meta.lastActivity || meta.createdAt || 0;
+    if (Date.now() - lastActivity > INACTIVITY_LIMIT) {
+      await redis(destroyCmds(code));
+      return fail(404, 'This game was deleted after 20 minutes of inactivity.');
+    }
+    meta.lastActivity = Date.now();
     const saveMeta = () => ['SET', K('meta'), JSON.stringify(meta), 'EX', TTL];
+    await redis([saveMeta()]); // persist the heartbeat immediately, even for actions that don't save meta again below
     const removePlayerCmds = (id) => [['HDEL', K('players'), id], ['HDEL', K('roles'), id], ['HDEL', K('acks'), id], ['HDEL', K('dead'), id], ['HDEL', K('votes'), id]];
     const dropRequestsFor = async (id) => {
       const [rq] = await redis([['HGETALL', K('requests')]]);
@@ -308,7 +328,7 @@ export default async function handler(req, res) {
 
     if (action === 'leave') {
       if (isHostKey) {
-        await redis([['DEL', K('meta')], ['DEL', K('players')], ['DEL', K('roles')], ['DEL', K('acks')], ['DEL', K('dead')], ['DEL', K('votes')], ['DEL', K('requests')], ['SREM', 'games:index', code]]);
+        await redis(destroyCmds(code));
         return res.status(200).json({ success: true, destroyed: true });
       }
       if (typeof playerId === 'string' && playerId) {
