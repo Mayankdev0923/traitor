@@ -1,9 +1,11 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import confetti from 'canvas-confetti';
+import './vote.css';
+import { HostVotePanel, PlayerVotePanel, VoteResults, ResultGate, useSound } from './Voting.jsx';
 import {
   Skull, Stethoscope, Search, Wheat, Lock, Shuffle, Copy, Users, Check, AlertCircle, LogOut,
-  Shield, Sparkles, Eye, Crown, Trash2, UserPlus, Clock, X, ChevronRight, RefreshCw, UserMinus,
+  Shield, Sparkles, Eye, Crown, Trash2, UserPlus, Clock, X, ChevronRight, RefreshCw, UserMinus, Undo2,
 } from 'lucide-react';
 
 const STORAGE_KEY = 'traitors_session_v2';
@@ -79,6 +81,8 @@ function AppInner() {
   const lastSigRef = useRef('');
   const roundRef = useRef(0);
   const slotTimerRef = useRef(null);
+  const skewRef = useRef(0); // server clock minus local clock, so every device's countdown matches
+  const sound = useSound();
 
   useEffect(() => {
     try {
@@ -141,7 +145,9 @@ function AppInner() {
     let alive = true, timer, fails = 0;
 
     const applyState = (data) => {
-      const sig = JSON.stringify(data);
+      const { serverNow, ...stable } = data;
+      if (serverNow) skewRef.current = serverNow - Date.now();
+      const sig = JSON.stringify(stable);
       if (sig === lastSigRef.current) return;            // nothing changed -> no re-render, no scroll jump
       lastSigRef.current = sig;
       const y = window.scrollY;
@@ -281,6 +287,25 @@ function AppInner() {
     endSession('');
   };
 
+  // ---------- voting + manual eliminations ----------
+  const hostCall = async (body, fallback) => {
+    const { ok, data } = await api({ code: session.code, hostKey: session.hostKey, ...body });
+    if (!ok) setErrorMsg(data.error || fallback);
+    lastSigRef.current = ''; // force the next poll to apply
+    return ok;
+  };
+  const startVote = (duration) => hostCall({ action: 'vote_start', duration }, 'Could not start voting.');
+  const endVote = () => hostCall({ action: 'vote_end' }, 'Could not end the vote.');
+  const cancelVote = () => hostCall({ action: 'vote_cancel' }, 'Could not cancel the vote.');
+  const markDead = (p) => hostCall({ action: 'mark_dead', target: p.pid }, 'Could not mark player dead.');
+  const revive = (p) => hostCall({ action: 'revive', target: p.pid }, 'Could not revive player.');
+  const castVote = async (target) => {
+    setGameState((prev) => (prev ? { ...prev, myVote: target } : prev));
+    const { ok, data } = await api({ action: 'vote_cast', code: session.code, playerId: session.playerId, target });
+    if (!ok) setErrorMsg(data.error || 'Your vote was not counted.');
+    lastSigRef.current = '';
+  };
+
   const copyCode = () => {
     try { navigator.clipboard.writeText(session.code); } catch {}
     setCopiedCode(true); setTimeout(() => setCopiedCode(false), 2000);
@@ -290,7 +315,7 @@ function AppInner() {
   const isPlayer = !!session?.playerId && !!gameState && !isHost;
 
   // ---------- small shared UI ----------
-  const AckBadge = ({ p }) => gameState?.round > 0 && (p.acked
+  const AckBadge = ({ p }) => p.dead ? <span className="player-ack-badge dead-badge">Eliminated</span> : gameState?.round > 0 && (p.acked
     ? <span className="player-ack-badge confirmed"><Check size={14} /> Hidden</span>
     : <span className="player-ack-badge waiting">Viewing</span>);
 
@@ -317,6 +342,8 @@ function AppInner() {
           </motion.div>
         )}
       </AnimatePresence>
+
+      {session && gameState && <ResultGate gameState={gameState} isHost={isHost} />}
 
       {/* ===== LANDING ===== */}
       {!session && !pendingRequest && (
@@ -450,6 +477,9 @@ function AppInner() {
             })()}
           </div>
 
+          <HostVotePanel gameState={gameState} onStart={startVote} onEnd={endVote} onCancel={cancelVote} skewRef={skewRef} sound={sound} />
+          <VoteResults lastVote={gameState.lastVote} />
+
           <div className="brutalist-card">
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14 }}>
               <div className="card-title" style={{ margin: 0 }}><Users size={22} /><span>Players ({gameState.totalPlayers})</span></div>
@@ -460,12 +490,15 @@ function AppInner() {
             ) : (
               <div className="player-list">
                 {gameState.players.map((p) => (
-                  <div key={p.pid} className="player-item">
+                  <div key={p.pid} className={'player-item' + (p.dead ? ' is-dead' : '')}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8, flex: 1, minWidth: 0 }}>
                       <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{p.name}</span>
                       <AckBadge p={p} />
                     </div>
                     <div style={{ display: 'flex', gap: 6 }}>
+                      <button title={p.dead ? `Revive ${p.name}` : `Mark ${p.name} dead`} aria-label={p.dead ? `Revive ${p.name}` : `Mark ${p.name} dead`} onClick={() => (p.dead ? revive(p) : markDead(p))} style={{ padding: '4px 8px', fontSize: '0.75rem', fontWeight: 700, border: 'var(--border-thick)', background: p.dead ? 'var(--neon-mint)' : 'var(--white)', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4 }}>
+                        {p.dead ? <Undo2 size={14} /> : <Skull size={14} />}<span>{p.dead ? 'Revive' : 'Dead'}</span>
+                      </button>
                       <button title={`Make ${p.name} the host`} onClick={() => setTransferTarget(p)} style={{ padding: '4px 8px', fontSize: '0.75rem', fontWeight: 700, border: 'var(--border-thick)', background: 'var(--white)', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 4 }}>
                         <Crown size={14} /><span>Host</span>
                       </button>
@@ -516,7 +549,7 @@ function AppInner() {
               <div className="card-title" style={{ marginBottom: 10 }}><Users size={20} /><span>Players in this room ({gameState.totalPlayers})</span></div>
               <div className="player-list">
                 {gameState.players.map((p) => (
-                  <div key={p.pid} className="player-item" style={{ boxShadow: 'none' }}>
+                  <div key={p.pid} className={'player-item' + (p.dead ? ' is-dead' : '')} style={{ boxShadow: 'none' }}>
                     <span style={{ fontWeight: p.you ? 800 : 600 }}>{p.name}{p.you ? ' (you)' : ''}</span>
                     <AckBadge p={p} />
                   </div>
@@ -524,6 +557,9 @@ function AppInner() {
               </div>
             </div>
           )}
+
+          <PlayerVotePanel gameState={gameState} onVote={castVote} skewRef={skewRef} sound={sound} />
+          <VoteResults lastVote={gameState.lastVote} />
 
           {!gameState.dealStarted && (
             <div className="brutalist-card" style={{ textAlign: 'center', padding: '36px 20px' }}>

@@ -65,6 +65,17 @@ function cryptoShuffle(arr) {
   return a;
 }
 
+// Traitors win when they equal/outnumber the other living players; everyone else wins when no traitor is left.
+function winnerOf(players, roles, dead) {
+  const ids = Object.keys(roles).filter((id) => players[id]);
+  if (!ids.some((id) => roles[id] === 'Traitor')) return null;
+  const alive = ids.filter((id) => !dead[id]);
+  const t = alive.filter((id) => roles[id] === 'Traitor').length;
+  if (t === 0) return 'villagers';
+  if (t >= alive.length - t) return 'traitors';
+  return null;
+}
+
 export default async function handler(req, res) {
   if (req.method === 'GET') {
     try { const [p] = await redis([['PING']]); return res.status(200).json({ redisConfigured: isRedisConfigured, ping: p }); }
@@ -124,17 +135,53 @@ export default async function handler(req, res) {
     const [metaRaw] = await redis([
       ['GET', K('meta')], ['EXPIRE', K('meta'), TTL], ['EXPIRE', K('players'), TTL],
       ['EXPIRE', K('roles'), TTL], ['EXPIRE', K('acks'), TTL], ['EXPIRE', K('requests'), TTL],
+      ['EXPIRE', K('dead'), TTL], ['EXPIRE', K('votes'), TTL],
     ]);
     const meta = safeParse(metaRaw);
     if (!meta) return fail(404, 'Game not found or host has left.');
     const saveMeta = () => ['SET', K('meta'), JSON.stringify(meta), 'EX', TTL];
-    const removePlayerCmds = (id) => [['HDEL', K('players'), id], ['HDEL', K('roles'), id], ['HDEL', K('acks'), id]];
+    const removePlayerCmds = (id) => [['HDEL', K('players'), id], ['HDEL', K('roles'), id], ['HDEL', K('acks'), id], ['HDEL', K('dead'), id], ['HDEL', K('votes'), id]];
     const dropRequestsFor = async (id) => {
       const [rq] = await redis([['HGETALL', K('requests')]]);
       const del = Object.entries(parseHash(rq)).filter(([, v]) => safeParse(v)?.playerId === id).map(([rid]) => rid);
       if (del.length) await redis([['HDEL', K('requests'), ...del]]);
     };
     const isHostKey = safeEq(hostKey, meta.hostKey);
+    const aliveEligible = (players, roles, dead) => Object.keys(roles).filter((id) => players[id] && !dead[id]);
+    const loadAll = async () => {
+      const [pl, rl, dd, vt] = await redis([['HGETALL', K('players')], ['HGETALL', K('roles')], ['HGETALL', K('dead')], ['HGETALL', K('votes')]]);
+      return { players: parseHash(pl), roles: parseHash(rl), dead: parseHash(dd), votes: parseHash(vt) };
+    };
+    // Closes the open vote: highest count is eliminated; a tie or no votes eliminates nobody.
+    const finalizeVote = async ({ players, roles, dead, votes }) => {
+      const v = meta.vote;
+      if (!v || v.status !== 'open') return;
+      const eligible = aliveEligible(players, roles, dead);
+      const count = {}, voters = {}; let skipped = 0, cast = 0;
+      for (const id of eligible) {
+        const t = votes[id];
+        if (!t) continue;
+        if (t === 'skip') { skipped++; cast++; continue; }
+        if (!players[t] || dead[t]) continue;
+        cast++; count[t] = (count[t] || 0) + 1; (voters[t] ||= []).push(players[id]);
+      }
+      const entries = Object.entries(count).sort((a, b) => b[1] - a[1]);
+      let outcome = { type: 'none' }; const cmds = [];
+      if (entries.length) {
+        const tops = entries.filter((e) => e[1] === entries[0][1]);
+        if (tops.length === 1) {
+          const id = tops[0][0];
+          outcome = { type: 'out', pid: pub(id), name: players[id] };
+          dead[id] = '1'; cmds.push(['HSET', K('dead'), id, '1'], ['EXPIRE', K('dead'), TTL]);
+        } else outcome = { type: 'tie', names: tops.map((e) => players[e[0]]) };
+      }
+      meta.lastVote = {
+        id: v.id, at: Date.now(), skipped, notVoted: eligible.length - cast, outcome,
+        tally: entries.map(([id, c]) => ({ pid: pub(id), name: players[id], count: c, voters: voters[id] || [] })),
+      };
+      meta.vote = null;
+      await redis([...cmds, saveMeta()]);
+    };
 
     // ---------- join flow (idempotent, so slow connections can't create duplicates) ----------
     if (action === 'request_join') {
@@ -184,11 +231,19 @@ export default async function handler(req, res) {
     // ---------- player actions ----------
     if (action === 'state') {
       const pid = typeof playerId === 'string' ? playerId : '';
-      const [pl, ak, role] = await redis([['HGETALL', K('players')], ['HGETALL', K('acks')], ['HGET', K('roles'), pid || 'none']]);
-      const players = parseHash(pl), acks = parseHash(ak);
+      const [pl, ak, rl, dd, vt] = await redis([['HGETALL', K('players')], ['HGETALL', K('acks')], ['HGETALL', K('roles')], ['HGETALL', K('dead')], ['HGETALL', K('votes')]]);
+      const all = { players: parseHash(pl), roles: parseHash(rl), dead: parseHash(dd), votes: parseHash(vt) };
+      const { players, roles, dead, votes } = all;
+      const acks = parseHash(ak);
+      if (meta.vote?.status === 'open' && Date.now() >= meta.vote.endsAt) await finalizeVote(all); // timer ran out
+      const winner = meta.round > 0 ? winnerOf(players, roles, dead) : null;
       const list = Object.keys(players)
-        .map((id) => ({ id, pid: pub(id), name: players[id], acked: acks[id] === String(meta.round) }))
+        .map((id) => ({ id, pid: pub(id), name: players[id], acked: acks[id] === String(meta.round), dead: !!dead[id], voted: !!votes[id] && !dead[id] }))
         .sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()) || a.pid.localeCompare(b.pid));
+      const eligible = aliveEligible(players, roles, dead);
+      const vote = meta.vote ? { id: meta.vote.id, endsAt: meta.vote.endsAt, duration: meta.vote.duration, voted: eligible.filter((id) => votes[id]).length, eligible: eligible.length } : null;
+      const finalRoles = winner ? Object.keys(roles).filter((id) => players[id]).map((id) => ({ name: players[id], role: roles[id], dead: !!dead[id] })) : undefined;
+      const common = { code, round: meta.round, vote, lastVote: meta.lastVote || null, serverNow: Date.now(), winner, finalRoles };
       const promoted = !isHostKey && pid && meta.hostPlayerId && safeEq(pid, meta.hostPlayerId);
 
       if (isHostKey || promoted) {
@@ -198,17 +253,23 @@ export default async function handler(req, res) {
           .filter((x) => x.r && x.r.status === 'pending')
           .map((x) => ({ requestId: x.rid, name: x.r.name }));
         return res.status(200).json({
-          isHost: true, hostKey: promoted ? meta.hostKey : undefined, code, round: meta.round, counts: meta.counts,
-          players: list.map(({ pid: h, name: n, acked }) => ({ pid: h, name: n, acked })),
+          ...common, isHost: true, hostKey: promoted ? meta.hostKey : undefined, counts: meta.counts,
+          players: list.map(({ pid: h, name: n, acked, dead: d, voted }) => ({ pid: h, name: n, acked, dead: d, voted })),
           totalPlayers: list.length, confirmedCount: list.filter((p) => p.acked).length, pendingRequests,
+          result: winner ? { winner, yourRole: null, youWon: null } : null,
         });
       }
       const joined = !!(pid && players[pid]);
+      const mine = joined ? roles[pid] : null;
+      const tv = joined ? votes[pid] : null;
       return res.status(200).json({
-        isHost: false, code, joined, name: joined ? players[pid] : null, hostName: meta.hostName,
-        round: meta.round, dealStarted: meta.round > 0, hasRole: joined && meta.round > 0 && !!role,
+        ...common, isHost: false, joined, name: joined ? players[pid] : null, hostName: meta.hostName,
+        dealStarted: meta.round > 0, hasRole: joined && meta.round > 0 && !!mine,
         acked: joined && acks[pid] === String(meta.round), totalPlayers: list.length,
-        players: list.map(({ id, pid: h, name: n, acked }) => ({ pid: h, name: n, acked, you: id === pid })),
+        youDead: joined && !!dead[pid],
+        myVote: tv === 'skip' ? 'skip' : tv && players[tv] ? pub(tv) : null,
+        result: winner ? { winner, yourRole: mine || null, youWon: mine ? (mine === 'Traitor') === (winner === 'traitors') : null } : null,
+        players: list.map(({ id, pid: h, name: n, acked, dead: d }) => ({ pid: h, name: n, acked, dead: d, you: id === pid })),
       });
     }
 
@@ -228,9 +289,26 @@ export default async function handler(req, res) {
       return res.status(200).json({ success: true, acked: true });
     }
 
+    if (action === 'vote_cast') {
+      const pid = typeof playerId === 'string' ? playerId : '';
+      const { players, roles, dead } = await loadAll();
+      if (!players[pid]) return fail(403, 'You are not in this game.');
+      if (!roles[pid]) return fail(400, 'You have no role this round, so you cannot vote.');
+      if (dead[pid]) return fail(403, 'Eliminated players cannot vote.');
+      const v = meta.vote;
+      if (!v || v.status !== 'open' || Date.now() >= v.endsAt) return fail(400, 'Voting is not open.');
+      let choice = 'skip';
+      if (target !== 'skip') {
+        choice = Object.keys(players).find((id) => pub(id) === target);
+        if (!choice || choice === pid || dead[choice] || !roles[choice]) return fail(400, 'Invalid vote target.');
+      }
+      await redis([['HSET', K('votes'), pid, choice], ['EXPIRE', K('votes'), TTL]]);
+      return res.status(200).json({ success: true });
+    }
+
     if (action === 'leave') {
       if (isHostKey) {
-        await redis([['DEL', K('meta')], ['DEL', K('players')], ['DEL', K('roles')], ['DEL', K('acks')], ['DEL', K('requests')], ['SREM', 'games:index', code]]);
+        await redis([['DEL', K('meta')], ['DEL', K('players')], ['DEL', K('roles')], ['DEL', K('acks')], ['DEL', K('dead')], ['DEL', K('votes')], ['DEL', K('requests')], ['SREM', 'games:index', code]]);
         return res.status(200).json({ success: true, destroyed: true });
       }
       if (typeof playerId === 'string' && playerId) {
@@ -304,6 +382,37 @@ export default async function handler(req, res) {
       return res.status(200).json({ success: true, stayedAs });
     }
 
+    if (action === 'vote_start') {
+      if (meta.round < 1) return fail(400, 'Deal roles before voting.');
+      if (meta.vote?.status === 'open') return fail(400, 'A vote is already open.');
+      const { players, roles, dead } = await loadAll();
+      if (winnerOf(players, roles, dead)) return fail(400, 'The game is over. Shuffle to start a new game.');
+      const duration = Math.min(600, Math.max(10, parseInt(body.duration, 10) || 60));
+      meta.voteSeq = (meta.voteSeq || 0) + 1;
+      meta.vote = { id: meta.voteSeq, status: 'open', duration, endsAt: Date.now() + duration * 1000 };
+      meta.lastVote = null;
+      await redis([['DEL', K('votes')], saveMeta()]);
+      return res.status(200).json({ success: true });
+    }
+    if (action === 'vote_end') {
+      if (meta.vote?.status !== 'open') return fail(400, 'No vote is open.');
+      await finalizeVote(await loadAll());
+      return res.status(200).json({ success: true });
+    }
+    if (action === 'vote_cancel') {
+      meta.vote = null;
+      await redis([['DEL', K('votes')], saveMeta()]);
+      return res.status(200).json({ success: true });
+    }
+    if (action === 'mark_dead' || action === 'revive') {
+      const { players, roles } = await loadAll();
+      const tid = Object.keys(players).find((id) => pub(id) === target);
+      if (!tid) return fail(404, 'Player not found.');
+      if (!roles[tid]) return fail(400, 'That player has no role this round.');
+      await redis([action === 'mark_dead' ? ['HSET', K('dead'), tid, '1'] : ['HDEL', K('dead'), tid], ['EXPIRE', K('dead'), TTL]]);
+      return res.status(200).json({ success: true });
+    }
+
     if (action === 'shuffle') {
       const [pl] = await redis([['HGETALL', K('players')]]);
       const ids = Object.keys(parseHash(pl)); // host is never in this list, so the host never gets a role
@@ -318,8 +427,9 @@ export default async function handler(req, res) {
       const shuffled = cryptoShuffle(deck);
       const flat = ids.flatMap((id, i) => [id, shuffled[i]]);
       meta.round = (meta.round || 0) + 1;
+      meta.vote = null; meta.lastVote = null; // fresh game: nobody is dead, no vote running
       // meta is written last so nobody sees a new round before roles exist
-      await redis([['DEL', K('roles')], ['DEL', K('acks')], ['HSET', K('roles'), ...flat], ['EXPIRE', K('roles'), TTL], saveMeta()]);
+      await redis([['DEL', K('roles')], ['DEL', K('acks')], ['DEL', K('dead')], ['DEL', K('votes')], ['HSET', K('roles'), ...flat], ['EXPIRE', K('roles'), TTL], saveMeta()]);
       return res.status(200).json({ success: true, round: meta.round, totalPlayers: ids.length });
     }
 
